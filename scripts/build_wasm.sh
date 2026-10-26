@@ -14,10 +14,13 @@ case "$variant" in all|threaded|single_thread) ;; *) echo 'Expected all, threade
 build_variant() {
   flavor=$1
   threads=$2
+  # vcpkg triplet identifiers only accept lowercase letters, digits and hyphens.
+  # Keep the public variant and output directory names independent of that rule.
+  triplet="wasm32-emscripten-$(printf '%s' "$flavor" | tr '_' '-')"
   cmake -S "$root" -B "$root/build_wasm_$flavor" -G Ninja \
     "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
     "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=$root/vcpkg-triplets/emscripten-wrapper.cmake" \
-    "-DVCPKG_TARGET_TRIPLET=wasm32-emscripten-$flavor" \
+    "-DVCPKG_TARGET_TRIPLET=$triplet" \
     "-DVCPKG_INSTALLED_DIR=$root/build_wasm_$flavor/vcpkg_installed" \
     -DVCPKG_INSTALL_OPTIONS=--allow-unsupported \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
