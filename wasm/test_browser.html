@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>stl2curves browser tests</title>
+<pre id="result">Running loader and worker tests…</pre>
+<script type="module">
+  const result = document.querySelector('#result');
+  const expected = location.pathname.startsWith('/isolated/');
+  // Load in an application Worker: synchronous C++ conversion must not block UI.
+  const worker = new Worker(new URL('./test_browser_worker.mjs', location.href), { type: 'module' });
+  worker.postMessage({ expected });
+  worker.onmessage = ({ data }) => {
+    window.__testResult = data;
+    result.textContent = JSON.stringify(data, null, 2);
+    worker.terminate();
+  };
+  worker.onerror = (error) => {
+    window.__testResult = { ok: false, error: error.message };
+    result.textContent = error.message;
+    worker.terminate();
+  };
+</script>

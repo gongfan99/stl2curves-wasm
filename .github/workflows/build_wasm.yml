@@ -1,0 +1,54 @@
+name: Build WASM (manual)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  EM_VERSION: 6.0.13
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [threaded, single_thread]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build autoconf automake libtool pkg-config
+      - name: Cache EMSDK
+        id: cache-emsdk
+        uses: actions/cache@v6
+        with:
+          path: emsdk
+          key: emsdk-${{ runner.os }}-${{ env.EM_VERSION }}
+      - name: Clone EMSDK
+        if: steps.cache-emsdk.outputs.cache-hit != 'true'
+        run: git clone https://github.com/emscripten-core/emsdk.git emsdk
+      - name: Install and activate EMSDK
+        if: steps.cache-emsdk.outputs.cache-hit != 'true'
+        run: |
+          emsdk/emsdk install "$EM_VERSION"
+          emsdk/emsdk activate "$EM_VERSION"
+      - name: Export preinstalled vcpkg
+        run: echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.cache/vcpkg-binaries
+          key: vcpkg-${{ runner.os }}-${{ matrix.variant }}-${{ env.EM_VERSION }}-${{ hashFiles('vcpkg*.json', 'vcpkg-triplets/**', 'vcpkg-overlays/**') }}
+      - name: Build and package
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          source emsdk/emsdk_env.sh
+          mkdir -p "$GITHUB_WORKSPACE/.cache/vcpkg-binaries"
+          export VCPKG_BINARY_SOURCES="clear;files,$GITHUB_WORKSPACE/.cache/vcpkg-binaries,readwrite"
+          sh scripts/build_wasm.sh "$VARIANT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: stl2curves-${{ matrix.variant }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+  # Runtime tests are deliberately deferred until artifacts are available and
+  # explicitly requested. This workflow only compiles and packages.

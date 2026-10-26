@@ -1,0 +1,7 @@
+if(NOT DEFINED ENV{EMSDK})
+  message(FATAL_ERROR "Activate EMSDK before configuring")
+endif()
+include("$ENV{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake")
+string(APPEND CMAKE_C_FLAGS_INIT " ${VCPKG_C_FLAGS}")
+string(APPEND CMAKE_CXX_FLAGS_INIT " ${VCPKG_CXX_FLAGS}")
+string(APPEND CMAKE_EXE_LINKER_FLAGS_INIT " ${VCPKG_LINKER_FLAGS}")

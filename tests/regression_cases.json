@@ -1,0 +1,9 @@
+[
+  {"name":"test_fine.stl", "volume":34615.8107, "allowedError":0.01, "maxFaces":29},
+  {"name":"test_coarse.stl", "volume":34615.8107, "allowedError":0.01, "maxFaces":29},
+  {"name":"test_hard.stl", "volume":35134.2571, "allowedError":0.05, "maxFaces":31},
+  {"name":"test_lid.stl", "volume":57600.4078, "allowedError":0.05, "maxFaces":45},
+  {"name":"test_sphere.stl", "volume":34303.8040, "allowedError":0.01, "maxFaces":34},
+  {"name":"test_corners.stl", "volume":32796.5606, "allowedError":0.1, "maxFaces":30},
+  {"name":"test_corners2.stl", "volume":14072.0767, "allowedError":0.1, "maxFaces":34}
+]

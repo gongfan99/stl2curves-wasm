@@ -1,0 +1,11 @@
+{
+  "name": "stl2curves",
+  "version": "0.1.0",
+  "dependencies": [
+    { "name": "opencascade", "default-features": false },
+    "eigen3",
+    "nanoflann",
+    { "name": "libzip", "default-features": false },
+    "pugixml"
+  ]
+}

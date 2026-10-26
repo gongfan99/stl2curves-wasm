@@ -1,0 +1,7 @@
+/build*/
+/dist/
+/.cache/
+/vcpkg_installed/
+/node_modules/
+/emsdk/
+*.log

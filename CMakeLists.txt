@@ -1,0 +1,111 @@
+cmake_minimum_required(VERSION 3.24)
+project(stl2curves VERSION 0.1.0 LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+option(WASM_THREADS "Enable pthreads (dependencies must use the same ABI)" ON)
+option(STL2CURVES_BUILD_TESTS "Build native tests and fixtures" OFF)
+option(STL2CURVES_SYSTEM_DEPS "Use system packages for native development checks" OFF)
+
+if(EMSCRIPTEN)
+  if(WASM_THREADS)
+    set(expected_triplet wasm32-emscripten-threaded)
+  else()
+    set(expected_triplet wasm32-emscripten-single_thread)
+  endif()
+  if(NOT VCPKG_TARGET_TRIPLET STREQUAL expected_triplet)
+    message(FATAL_ERROR "WASM_THREADS and VCPKG_TARGET_TRIPLET disagree: expected ${expected_triplet}")
+  endif()
+  if(STL2CURVES_SYSTEM_DEPS)
+    message(FATAL_ERROR "WASM must use the pinned vcpkg dependencies")
+  endif()
+endif()
+
+find_package(OpenCASCADE CONFIG REQUIRED)
+find_package(Eigen3 CONFIG REQUIRED)
+find_package(pugixml CONFIG REQUIRED)
+find_package(nanoflann CONFIG REQUIRED)
+if(STL2CURVES_SYSTEM_DEPS)
+  find_library(ZIP_LIBRARY NAMES zip REQUIRED)
+  set(zip_target ${ZIP_LIBRARY})
+else()
+  find_package(libzip CONFIG REQUIRED)
+  set(zip_target libzip::zip)
+endif()
+if(WASM_THREADS)
+  find_package(Threads REQUIRED)
+endif()
+
+add_library(stl2curves_core STATIC
+  cpp/numeric.cpp cpp/mesh.cpp cpp/read3mf.cpp cpp/detect.cpp
+  cpp/advanced.cpp cpp/build.cpp cpp/step.cpp cpp/converter.cpp)
+target_include_directories(stl2curves_core PUBLIC include PRIVATE cpp ${OpenCASCADE_INCLUDE_DIR})
+target_link_libraries(stl2curves_core PUBLIC
+  Eigen3::Eigen pugixml::pugixml nanoflann::nanoflann ${zip_target}
+  TKernel TKMath TKG2d TKG3d TKGeomBase TKBRep TKGeomAlgo TKTopAlgo
+  TKPrim TKBO TKBool TKShHealing TKFillet TKOffset TKMesh)
+if(TARGET TKDESTEP)
+  target_link_libraries(stl2curves_core PUBLIC TKDESTEP)
+else()
+  target_link_libraries(stl2curves_core PUBLIC TKSTEP TKSTEPBase TKSTEPAttr TKXSBase)
+endif()
+target_compile_definitions(stl2curves_core PUBLIC STL2CURVES_THREADS=$<BOOL:${WASM_THREADS}>)
+if(WASM_THREADS)
+  target_link_libraries(stl2curves_core PUBLIC Threads::Threads)
+endif()
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(stl2curves_core PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(EMSCRIPTEN)
+  add_executable(stl2curves wasm/binding.cpp)
+  target_link_libraries(stl2curves PRIVATE stl2curves_core)
+  # JS-based exception handling works with the pinned SDK and older browsers.
+  # Propagate to every project TU; the dependency triplets use matching flags.
+  target_compile_options(stl2curves_core PUBLIC -fexceptions -Os)
+  target_link_options(stl2curves PRIVATE
+    -fexceptions -Os --no-entry --bind
+    --post-js ${CMAKE_SOURCE_DIR}/wasm/post.js
+    -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createStl2curves
+    "-sINCOMING_MODULE_JS_API=[\"locateFile\",\"mainScriptUrlOrBlob\",\"wasmBinary\",\"print\",\"printErr\",\"onRuntimeInitialized\"]"
+    -sENVIRONMENT=web,worker,node -sFILESYSTEM=0
+    -sSTACK_SIZE=8MB -sINITIAL_MEMORY=192MB
+    -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2GB
+    -sALLOW_BLOCKING_ON_MAIN_THREAD=0)
+  if(WASM_THREADS)
+    target_compile_options(stl2curves_core PUBLIC -pthread)
+    # Prewarm the browser's logical CPU count; fitting schedules at most 8 tasks.
+    target_link_options(stl2curves PRIVATE -pthread "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency" -sPTHREAD_POOL_SIZE_STRICT=2)
+  endif()
+  set_target_properties(stl2curves PROPERTIES SUFFIX .js)
+  add_custom_command(TARGET stl2curves POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      ${CMAKE_SOURCE_DIR}/wasm/stl2curves.d.ts ${CMAKE_CURRENT_BINARY_DIR}/stl2curves.d.ts)
+elseif(STL2CURVES_BUILD_TESTS)
+  enable_testing()
+  add_executable(test_core tests/test_core.cpp)
+  target_include_directories(test_core PRIVATE cpp ${OpenCASCADE_INCLUDE_DIR})
+  target_link_libraries(test_core PRIVATE stl2curves_core)
+  add_test(NAME core COMMAND test_core)
+  add_executable(test_advanced tests/test_advanced.cpp)
+  target_include_directories(test_advanced PRIVATE cpp ${OpenCASCADE_INCLUDE_DIR})
+  target_link_libraries(test_advanced PRIVATE stl2curves_core)
+  add_test(NAME advanced COMMAND test_advanced)
+  set_tests_properties(advanced PROPERTIES TIMEOUT 120)
+  add_executable(generate_fixtures tests/generate_fixtures.cpp)
+  target_link_libraries(generate_fixtures PRIVATE stl2curves_core)
+  target_include_directories(generate_fixtures PRIVATE cpp ${OpenCASCADE_INCLUDE_DIR})
+  if(TARGET TKDESTL)
+    target_link_libraries(generate_fixtures PRIVATE TKDESTL)
+  else()
+    target_link_libraries(generate_fixtures PRIVATE TKSTL)
+  endif()
+  add_executable(test_regression tests/test_regression.cpp)
+  target_link_libraries(test_regression PRIVATE stl2curves_core)
+  add_executable(inspect_detection tests/inspect_detection.cpp)
+  target_include_directories(inspect_detection PRIVATE cpp ${OpenCASCADE_INCLUDE_DIR})
+  target_link_libraries(inspect_detection PRIVATE stl2curves_core)
+  add_executable(inspect_reference tests/inspect_reference.cpp)
+  target_include_directories(inspect_reference PRIVATE cpp ${OpenCASCADE_INCLUDE_DIR})
+  target_link_libraries(inspect_reference PRIVATE stl2curves_core)
+endif()
