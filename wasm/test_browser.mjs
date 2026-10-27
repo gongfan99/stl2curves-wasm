@@ -1,4 +1,4 @@
-// Do not run until WASM artifacts have been built and testing is requested.
+// Run against built WASM artifacts placed in dist/.
 import { chromium } from 'playwright';
 import { createServer } from './browser_server.mjs';
 import { assert } from './test_helpers.mjs';
@@ -7,7 +7,9 @@ const server = createServer();
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 let browser;
 try {
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true,
+    ...(process.env.STL2CURVES_BROWSER_CHANNEL ? { channel: process.env.STL2CURVES_BROWSER_CHANNEL } : {}),
+  });
   for (const mode of ['ordinary', 'isolated']) {
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${server.address().port}/${mode}/wasm/test_browser.html`);
@@ -15,6 +17,7 @@ try {
     const result = await page.evaluate(() => window.__testResult);
     assert(result.ok, `${mode}: ${result.error}`);
     assert(result.info.threaded === (mode === 'isolated'), 'Loader selected incorrect variant');
+    console.log(`${mode}: blob-loader and Worker conversion checks passed (${JSON.stringify(result.info)})`);
     await page.close();
   }
   console.log('Browser blob-loader tests passed for both variants');

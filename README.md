@@ -39,8 +39,9 @@ licenses/
 ```
 
 Any separate `stl2curves.worker.*` files emitted by the SDK are also packaged.
-The workflow does not run WASM tests. Compilation and runtime validation are
-deferred until you trigger the workflow and request testing with its artifacts.
+The workflow builds and packages assets; runtime tests are run separately against
+downloaded artifacts. See [validation status](docs/VALIDATION.md) for tested builds
+and the JavaScript initialization fix required by the first supplied artifacts.
 
 Dependencies use vcpkg registry baseline `817892b0ecbc6af994dd6df999c73faf795adbf2`, including
 OpenCascade **8.0.1**. The headless overlay retains that port's source hash and
@@ -48,7 +49,7 @@ patches, selects geometry/STEP/STL toolkits, and keeps C++ exception handling.
 Emscripten is pinned to **6.0.13**. The workflow caches EMSDK and dependency
 binaries and uses the runner's preinstalled vcpkg.
 
-For an explicit local build later, activate that SDK and set `VCPKG_ROOT`:
+For a local build, activate that SDK and set `VCPKG_ROOT`:
 
 ```sh
 sh scripts/build_wasm.sh                # both variants
@@ -159,6 +160,7 @@ node scripts/check_sources.mjs
 sh -n scripts/build_wasm.sh
 # After installing the development dependencies:
 npm run check:types
+npm run test:post
 ```
 
 Native tests require CMake, a C++17 compiler, and the manifest dependencies:
@@ -182,8 +184,7 @@ reports face properties and sampled deviations from the original CAD geometry.
 it is rejected for WASM. Such checks do not establish compatibility with the
 pinned OCCT 8.0.1/Emscripten toolchain.
 
-Prepared commands for **later**, after artifacts are available and testing is
-requested:
+To test compiled artifacts placed in `dist/`:
 
 ```sh
 node wasm/test_node.mjs threaded
@@ -194,6 +195,8 @@ STL2CURVES_FIXTURES=build_native/fixtures node wasm/test_node.mjs single_thread
 npm install
 npx playwright install chromium
 node wasm/test_browser.mjs
+# Alternatively, use an installed Google Chrome:
+STL2CURVES_BROWSER_CHANNEL=chrome node wasm/test_browser.mjs
 ```
 
 `STL2CURVES_WASM_MODULE` can select another artifact's JavaScript path. Browser

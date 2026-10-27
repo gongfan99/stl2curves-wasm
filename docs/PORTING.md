@@ -53,5 +53,6 @@ heuristic verbatim. Self-intersecting/nonmanifold meshes can still fail instead
 of yielding a solid. Full conversion parity must remain an explicit acceptance
 gate; build success and basic tests alone do not establish it.
 
-WASM compilation and runtime tests are intentionally deferred until the user
-manually runs the GitHub workflow and makes the artifacts available.
+WASM compilation is performed through the manual GitHub workflow. Supplied
+artifacts have been tested in Node and browsers; see `VALIDATION.md` for scope,
+results and the JavaScript initialization correction required by the first build.

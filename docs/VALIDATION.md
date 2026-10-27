@@ -1,14 +1,45 @@
 # Validation status
 
-WASM has not been compiled or executed during implementation. The manual build
-workflow has not been triggered. Browser loading, Emscripten 6.0.13, and the
-WASM build of OpenCascade 8.0.1 still require artifact-based validation.
+On 2026-10-26, user-supplied Emscripten 6.0.13/OpenCascade 8.0.1 artifacts were
+tested on Windows with Node.js 24.15.0 and headless browsers. No local WASM
+compilation or workflow dispatch was performed during this validation.
+
+The original JavaScript failed initialization in both variants because our
+`--post-js` wrapper called `addOnPostRun`, which the generated SDK output did
+not define. In this SDK, post-js runs after awaited runtime initialization.
+`wasm/post.js` now wraps initialized Embind exports directly and skips wrapping
+in pthread bootstrap instances. Tests used local copies of the supplied assets
+with only this post-js section replaced; the downloaded originals were preserved.
+The source fix still needs to be included in the next workflow build.
+
+| Runtime check | single_thread | threaded |
+| --- | --- | --- |
+| Node API, ownership, errors, repeated conversions and disposal | pass | pass |
+| Node 3MF units/names, malformed archives and mesh defects | pass | pass |
+| All seven original regression volume and face limits, one module per variant | pass | pass |
+| Chrome blob loader and application Worker | pass | pass |
+| Playwright Chromium 141.0.7390.37 blob loader and application Worker | pass | pass |
+| Background fitting | no background tasks, as expected | pthread tasks observed |
+
+Browser runs exercised ordinary and cross-origin-isolated pages, automatic
+variant selection, owned STEP buffers, STEP re-import validation, 3MF conversion,
+repeated conversions, structured failures and twelve disconnected analytic bodies.
+Tests also assert that conversion is rejected after disposal in Node. Separate
+JavaScript lifecycle tests cover an absent SDK callback helper, error recovery,
+busy guards, idempotent disposal and pthread bootstrap without Embind exports.
+
+The unchanged WASM binaries have these SHA-256 digests:
+
+| Variant | SHA-256 |
+| --- | --- |
+| single_thread | `01c5bc7de1381b443b075fd8ebe2b52ab2d8675734ebd0da894b82f979797670` |
+| threaded | `4772e99662b2737aa618920f6f20d8e07fb9fd26bb69f030f6f6175119052b42` |
 
 Current native acceptance checks use OpenCascade 8.0.1, built from the archive
 whose SHA-512 matches the pinned vcpkg port. The headless native build disables
 X11 and OpenGL. Other development dependencies are GCC 13.3, Eigen 3.4,
-nanoflann 1.5.4, libzip 1.7.3, and pugixml 1.14. These checks do not establish
-compatibility with the Emscripten build or the complete pinned vcpkg dependency
+nanoflann 1.5.4, libzip 1.7.3, and pugixml 1.14. These native checks alone do not
+establish compatibility with Emscripten or the complete pinned vcpkg dependency
 set. Earlier development checks also used Ubuntu's OpenCascade 7.6.3 packages.
 
 Both native scheduling configurations pass the core and advanced fitting tests.
@@ -42,13 +73,11 @@ and pass fresh STEP re-import validity checks. Blend junctions retain exact
 analytic region boundaries; very slender transition facets are reassigned only
 when a neighboring surface explains their vertices and preserves orientation.
 The limits have not been relaxed. These fixtures do not establish full upstream
-parity for every input; broader conversion parity and WASM runtime acceptance
-remain validation targets.
+parity for every input; broader conversion parity remains a validation target.
 
-Prepared Node and browser suites exercise both variants, the actual blob loader,
+Node and browser suites exercise both variants, the actual blob loader,
 isolation-based variant selection, owned buffers, repeated conversions, STEP
 re-import validation, 3MF units and archive failures, and actual background fitting
 on disconnected cylinders.
 The optional Node fixture suite applies all seven original regression limits.
-Run these only after compiled artifacts are supplied and testing is requested,
-using the commands in the README.
+Run these against compiled artifacts using the commands in the README.
