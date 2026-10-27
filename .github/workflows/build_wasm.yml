@@ -39,6 +39,7 @@ jobs:
       - name: Build and package variant
         env:
           VARIANT: ${{ matrix.variant }}
+          PACKAGE_VARIANT_ONLY: "ON"
         run: |
           source emsdk/emsdk_env.sh
           mkdir -p "$GITHUB_WORKSPACE/.cache/vcpkg-binaries"
@@ -47,20 +48,29 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: stl2curves-part-${{ matrix.variant }}
-          path: dist/
+          path: dist/${{ matrix.variant }}/
           if-no-files-found: error
           retention-days: 1
   package:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Combine both variants into the deployment archive
-        uses: actions/upload-artifact/merge@v7
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: stl2curves-part-threaded
+          path: .cache/wasm-parts/threaded
+      - uses: actions/download-artifact@v8
+        with:
+          name: stl2curves-part-single_thread
+          path: .cache/wasm-parts/single_thread
+      - name: Assemble and validate deployment layout
+        run: cmake -DROOT="$GITHUB_WORKSPACE" -DINPUT_DIR="$GITHUB_WORKSPACE/.cache/wasm-parts" -P scripts/assemble_wasm.cmake
+      - uses: actions/upload-artifact@v7
         with:
           name: stl2curves-wasm
-          pattern: stl2curves-part-*
-          separate-directories: false
-          delete-merged: true
+          path: dist/
+          if-no-files-found: error
           retention-days: 14
   # Runtime tests are deliberately deferred until artifacts are available and
   # explicitly requested. This workflow only compiles and packages.

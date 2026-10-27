@@ -26,7 +26,8 @@ build_variant() {
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
     "-DWASM_THREADS=$threads"
   cmake --build "$root/build_wasm_$flavor" --parallel "${BUILD_JOBS:-2}"
-  cmake -DROOT="$root" -DVARIANT="$flavor" -P "$root/scripts/package_wasm.cmake"
+  cmake -DROOT="$root" -DVARIANT="$flavor" \
+    "-DVARIANT_ONLY=${PACKAGE_VARIANT_ONLY:-OFF}" -P "$root/scripts/package_wasm.cmake"
 }
 if [ "$variant" = all ] || [ "$variant" = threaded ]; then build_variant threaded ON; fi
 if [ "$variant" = all ] || [ "$variant" = single_thread ]; then build_variant single_thread OFF; fi

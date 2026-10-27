@@ -19,9 +19,6 @@ Python packaging, and disk stage cache are outside this library.
 ## Build with GitHub Actions
 
 The workflow is manual only: **Actions → Build WASM (manual) → Run workflow**.
-It builds the variants in parallel on separate runners, then merges their
-temporary artifacts into a single `stl2curves-wasm` artifact. Temporary artifacts
-are deleted after the merge succeeds. Download and extract `stl2curves-wasm.zip`;
 it contains the complete deployment layout at its root:
 
 ```text
@@ -79,14 +76,18 @@ fitting tasks concurrently, including the calling thread.
 
 ```js
 // Application Worker; adjust the loader URL to your deployed asset location.
-import { stl2curves } from './assets/loader.mjs';
+import { stl2curves } from "./assets/loader.mjs";
 
 self.onmessage = ({ data: { name, bytes } }) => {
-  const result = stl2curves.convert(
-    [{ name, data: new Uint8Array(bytes) }],
-    { tolerance: 0.01, accuracy: 0.1, details: true }
+  const result = stl2curves.convert([{ name, data: new Uint8Array(bytes) }], {
+    tolerance: 0.01,
+    accuracy: 0.1,
+    details: true,
+  });
+  self.postMessage(
+    result,
+    result.files.map((file) => file.data.buffer),
   );
-  self.postMessage(result, result.files.map(file => file.data.buffer));
 };
 ```
 
@@ -119,19 +120,19 @@ Both variants export the same factory and API. Types are in
 and the bounded worker count. Configuration errors throw; conversion failures
 are returned in `errors` with input/object names, code, and message.
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `tolerance` | `0.01` | Sewing tolerance in millimeters |
-| `accuracy` | `0.1` | Fitting accuracy in millimeters |
-| `timeLimit` | `600` | Optional-refinement budget in seconds; `0` unlimited |
-| `simplify` | `-1` | Automatic; `0` disabled; positive values in millimeters |
-| `fuse` | `true` | Fuse reconstructed bodies and object parts |
-| `curves` | `true` | Enable curved-surface recognition |
-| `blends` | `true` | Enable optional swept/freeform/blend fitting |
-| `repair` | `true` | Repair supported mesh defects |
-| `trueSize` | `false` | Apply a common inferred design scale |
-| `details` | `false` | Include per-feature detection details |
-| `merge` | `""` | Also write a combined STEP using this name |
+| Option      | Default | Meaning                                                 |
+| ----------- | ------- | ------------------------------------------------------- |
+| `tolerance` | `0.01`  | Sewing tolerance in millimeters                         |
+| `accuracy`  | `0.1`   | Fitting accuracy in millimeters                         |
+| `timeLimit` | `600`   | Optional-refinement budget in seconds; `0` unlimited    |
+| `simplify`  | `-1`    | Automatic; `0` disabled; positive values in millimeters |
+| `fuse`      | `true`  | Fuse reconstructed bodies and object parts              |
+| `curves`    | `true`  | Enable curved-surface recognition                       |
+| `blends`    | `true`  | Enable optional swept/freeform/blend fitting            |
+| `repair`    | `true`  | Repair supported mesh defects                           |
+| `trueSize`  | `false` | Apply a common inferred design scale                    |
+| `details`   | `false` | Include per-feature detection details                   |
+| `merge`     | `""`    | Also write a combined STEP using this name              |
 
 Automatic simplification uses `0.005 mm` above one million triangles.
 Diagnostics `scale` is the inferred design factor; it is applied only when
@@ -145,10 +146,10 @@ repair; overlapping parts are reconstructed separately before fusion. Diagnostic
 Node.js 24 or later can import a variant factory directly:
 
 ```js
-import createStl2curves from './dist/single_thread/stl2curves.js';
+import createStl2curves from "./dist/single_thread/stl2curves.js";
 const module = await createStl2curves();
 try {
-  const result = module.convert([{ name: 'part.stl', data: inputBytes }]);
+  const result = module.convert([{ name: "part.stl", data: inputBytes }]);
 } finally {
   module.dispose();
 }
@@ -164,6 +165,7 @@ sh -n scripts/build_wasm.sh
 # After installing the development dependencies:
 npm run check:types
 npm run test:post
+npm run test:package
 ```
 
 Native tests require CMake, a C++17 compiler, and the manifest dependencies:
