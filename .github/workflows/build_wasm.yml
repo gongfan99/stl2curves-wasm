@@ -8,10 +8,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        variant: [threaded, single_thread]
     steps:
       - uses: actions/checkout@v7
       - name: Install build tools
@@ -35,18 +31,16 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.cache/vcpkg-binaries
-          key: vcpkg-${{ runner.os }}-${{ matrix.variant }}-${{ env.EM_VERSION }}-${{ hashFiles('vcpkg*.json', 'vcpkg-triplets/**', 'vcpkg-overlays/**') }}
-      - name: Build and package
-        env:
-          VARIANT: ${{ matrix.variant }}
+          key: vcpkg-${{ runner.os }}-both-${{ env.EM_VERSION }}-${{ hashFiles('vcpkg*.json', 'vcpkg-triplets/**', 'vcpkg-overlays/**') }}
+      - name: Build and package both variants
         run: |
           source emsdk/emsdk_env.sh
           mkdir -p "$GITHUB_WORKSPACE/.cache/vcpkg-binaries"
           export VCPKG_BINARY_SOURCES="clear;files,$GITHUB_WORKSPACE/.cache/vcpkg-binaries,readwrite"
-          sh scripts/build_wasm.sh "$VARIANT"
+          sh scripts/build_wasm.sh all
       - uses: actions/upload-artifact@v7
         with:
-          name: stl2curves-${{ matrix.variant }}
+          name: stl2curves-wasm
           path: dist/
           if-no-files-found: error
           retention-days: 14
