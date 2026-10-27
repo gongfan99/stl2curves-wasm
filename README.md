@@ -19,9 +19,10 @@ Python packaging, and disk stage cache are outside this library.
 ## Build with GitHub Actions
 
 The workflow is manual only: **Actions → Build WASM (manual) → Run workflow**.
-It builds both variants in one job and uploads a single `stl2curves-wasm`
-artifact. Download and extract `stl2curves-wasm.zip`; it contains the complete
-deployment layout at its root:
+It builds the variants in parallel on separate runners, then merges their
+temporary artifacts into a single `stl2curves-wasm` artifact. Temporary artifacts
+are deleted after the merge succeeds. Download and extract `stl2curves-wasm.zip`;
+it contains the complete deployment layout at its root:
 
 ```text
 loader.mjs
