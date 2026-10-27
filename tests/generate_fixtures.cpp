@@ -1,6 +1,7 @@
 // C++ equivalents of upstream tests/make_*.py at 9f71aaa16eb689e759435d2e1fbf2ba7468cadfb.
 // Copyright (c) 2026 Duvdivan. MIT license.
 #include "occt_collections.hpp"
+#include "occt_error.hpp"
 using stl2curves::detail::ShapeMap;
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -222,7 +223,7 @@ int main(int argc, char **argv) {
         corners(d);
         return 0;
     } catch (const Standard_Failure &e) {
-        std::cerr << e.GetMessageString() << '\n';
+        std::cerr << stl2curves::detail::failure_message(e) << '\n';
         return 1;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

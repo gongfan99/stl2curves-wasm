@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "occt_error.hpp"
 #include <ShapeFix_Shape.hxx>
 #include <Standard_Failure.hxx>
 #include <Standard_Version.hxx>
@@ -239,8 +240,7 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
                     } catch (const Standard_Failure &e) {
                         ctx.diagnostics.fallback = true;
                         ctx.diagnostics.fallbacks.push_back(
-                            e.GetMessageString() ? e.GetMessageString()
-                                                 : "OpenCascade reconstruction failure");
+                            failure_message(e, "OpenCascade reconstruction failure"));
                         shape = recover(mesh, patches, ctx);
                     } catch (const std::exception &e) {
                         ctx.diagnostics.fallback = true;
@@ -262,10 +262,8 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
                 if (!options.merge.empty())
                     successful.push_back(exported);
             } catch (const Standard_Failure &e) {
-                result.errors.push_back(
-                    {input.name, object.name, "geometry",
-                     e.GetMessageString() ? e.GetMessageString() : "OpenCascade failure",
-                     std::move(ctx.diagnostics)});
+                result.errors.push_back({input.name, object.name, "geometry", failure_message(e),
+                                         std::move(ctx.diagnostics)});
             } catch (const std::exception &e) {
                 result.errors.push_back(
                     {input.name, object.name, "conversion", e.what(), std::move(ctx.diagnostics)});
@@ -284,8 +282,7 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
                 {unique(safe_name(std::filesystem::path(options.merge).stem().string())) + ".step",
                  std::move(bytes), std::move(ctx.diagnostics)});
         } catch (const Standard_Failure &e) {
-            result.errors.push_back({"", "merge", "export",
-                                     e.GetMessageString() ? e.GetMessageString() : "Merge failure",
+            result.errors.push_back({"", "merge", "export", failure_message(e, "Merge failure"),
                                      std::move(ctx.diagnostics)});
         } catch (const std::exception &e) {
             result.errors.push_back({"", "merge", "export", e.what(), std::move(ctx.diagnostics)});

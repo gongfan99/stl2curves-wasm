@@ -197,8 +197,8 @@ std::vector<std::pair<Vec, double>> symmetry_planes(const Mesh &mesh) {
             Vec reflected = mesh.points[i] - 2 * (n.dot(mesh.points[i]) - offset) * n;
             std::size_t nearest;
             double distance;
-            tree.knnSearch(reflected.data(), 1, &nearest, &distance);
-            if (distance <= tolerance * tolerance)
+            if (tree.knnSearch(reflected.data(), 1, &nearest, &distance) == 1 &&
+                distance <= tolerance * tolerance)
                 ++good;
             ++total;
         }

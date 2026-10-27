@@ -14,8 +14,6 @@ jobs:
         variant: [threaded, single_thread]
     steps:
       - uses: actions/checkout@v7
-      - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build autoconf automake libtool pkg-config
       - name: Cache EMSDK
         id: cache-emsdk
         uses: actions/cache@v6
@@ -71,6 +69,6 @@ jobs:
           name: stl2curves-wasm
           path: dist/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
   # Runtime tests are deliberately deferred until artifacts are available and
   # explicitly requested. This workflow only compiles and packages.

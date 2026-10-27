@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "occt_error.hpp"
 #include "projection.hpp"
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -1078,9 +1079,7 @@ TopoDS_Shape build(const Mesh &mesh, const std::vector<Patch> &patches, double t
         try {
             boundaries = shared_boundaries(mesh, patches, tolerance, boundary_mode == 2);
         } catch (const Standard_Failure &error) {
-            throw std::runtime_error(std::string("Boundaries: ") + (error.GetMessageString()
-                                                                        ? error.GetMessageString()
-                                                                        : "OpenCascade failure"));
+            throw std::runtime_error(std::string("Boundaries: ") + failure_message(error));
         }
     if (patches.empty())
         for (const auto &t : mesh.triangles)
@@ -1126,8 +1125,7 @@ TopoDS_Shape build(const Mesh &mesh, const std::vector<Patch> &patches, double t
                             curved_triangle(mesh, t, p.surface, tolerance, boundaries, projector));
                 } catch (const Standard_Failure &error) {
                     throw std::runtime_error(p.kind + " face " + std::to_string(id) + ": " +
-                                             (error.GetMessageString() ? error.GetMessageString()
-                                                                       : "OpenCascade failure"));
+                                             failure_message(error));
                 }
             }
         }
@@ -1135,9 +1133,7 @@ TopoDS_Shape build(const Mesh &mesh, const std::vector<Patch> &patches, double t
     try {
         sewing.Perform();
     } catch (const Standard_Failure &error) {
-        throw std::runtime_error(std::string("Sewing: ") + (error.GetMessageString()
-                                                                ? error.GetMessageString()
-                                                                : "OpenCascade failure"));
+        throw std::runtime_error(std::string("Sewing: ") + failure_message(error));
     }
     auto sewn = sewing.SewedShape();
     if (sewn.IsNull())
@@ -1148,9 +1144,7 @@ TopoDS_Shape build(const Mesh &mesh, const std::vector<Patch> &patches, double t
         shape = close_shells(sewn, tolerance);
         BRepLib::SameParameter(shape, std::min(1e-5, tolerance * .001), true);
     } catch (const Standard_Failure &error) {
-        throw std::runtime_error(std::string("Shell closure: ") + (error.GetMessageString()
-                                                                       ? error.GetMessageString()
-                                                                       : "OpenCascade failure"));
+        throw std::runtime_error(std::string("Shell closure: ") + failure_message(error));
     }
     if (!patches.empty() && boundary_mode)
         trace_invalid_faces(shape, &patches);
@@ -1206,8 +1200,7 @@ TopoDS_Shape reconstruct(const Mesh &mesh, const std::vector<Patch> &patches, Co
                 (mode == 0 || volume_agrees(fixed, mesh, patches)))
                 return fixed;
         } catch (const Standard_Failure &error) {
-            trace(error.GetMessageString() ? error.GetMessageString()
-                                           : "Shared-boundary reconstruction failed");
+            trace(failure_message(error, "Shared-boundary reconstruction failed"));
         } catch (const std::runtime_error &error) {
             trace(error.what());
         }
