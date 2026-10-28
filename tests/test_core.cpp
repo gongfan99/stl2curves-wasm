@@ -347,7 +347,7 @@ void test_conversion() {
     no_repair.repair = false;
     no_repair.curves = false;
     auto failed = convert({{"open.stl", ascii(open)}}, no_repair);
-    check(failed.files.empty() && failed.errors.size() == 1 && failed.errors[0].diagnostics &&
+    check(failed.models.empty() && failed.errors.size() == 1 && failed.errors[0].diagnostics &&
               failed.errors[0].diagnostics->open_edges == 4,
           "failed-object diagnostics retain unresolved mesh defects");
     Options o;
@@ -356,21 +356,22 @@ void test_conversion() {
     auto r = convert({{"cube.stl", bytes}}, o);
     if (!r.errors.empty())
         throw std::runtime_error(r.errors[0].message);
-    check(r.files.size() == 1, "cube output");
-    auto d = r.files[0].diagnostics;
+    check(r.models.size() == 1, "cube output");
+    auto d = r.models[0]->diagnostics();
     check(d.valid && d.faces == 6 && d.solids == 1 && std::abs(d.volume - 1) < 1e-8,
           "cube validity and planar consolidation");
-    auto retained = r.files[0].data;
+    auto exported = r.models[0]->export_step();
+    auto retained = exported.data;
     o.curves = false;
     o.blends = false;
     o.repair = false;
     o.simplify = 0;
     o.merge = "assembly";
     auto repeated = convert({{"a.stl", bytes}, {"a.stl", bytes}, {"invalid.stl", {1, 2, 3}}}, o);
-    check(repeated.files.size() == 3 && repeated.errors.size() == 1,
+    check(repeated.models.size() == 3 && repeated.errors.size() == 1,
           "batch partial success and merge");
-    check(repeated.files[0].name != repeated.files[1].name, "unique names");
-    check(r.files[0].data == retained, "retained buffer ownership");
+    check(repeated.models[0]->name() != repeated.models[1]->name(), "unique names");
+    check(exported.data == retained, "retained buffer ownership");
     bool caught = false;
     o.accuracy = 0;
     try {
@@ -393,8 +394,8 @@ void test_conversion() {
         container.triangles.push_back(t);
     }
     auto cavity = convert({{"cavity.stl", ascii(container)}}, Options{});
-    check(cavity.errors.empty() && cavity.files.size() == 1 &&
-              std::abs(cavity.files[0].diagnostics.volume - 26) < 1e-6,
+    check(cavity.errors.empty() && cavity.models.size() == 1 &&
+              std::abs(cavity.models[0]->diagnostics().volume - 26) < 1e-6,
           "nested cavity shells");
     auto project =
         "<model><resources><object id='1'>" + cube_xml() +
@@ -403,8 +404,8 @@ void test_conversion() {
         "objectid='2'/></build></model>";
     auto overlapping =
         convert({{"overlap.3mf", archive({{"3D/3dmodel.model", project}})}}, Options{});
-    check(overlapping.errors.empty() && overlapping.files.size() == 1 &&
-              std::abs(overlapping.files[0].diagnostics.volume - 1.5) < 1e-6,
+    check(overlapping.errors.empty() && overlapping.models.size() == 1 &&
+              std::abs(overlapping.models[0]->diagnostics().volume - 1.5) < 1e-6,
           "overlapping 3MF parts must be repaired separately and fused");
     auto scaled = cube();
     for (auto &point : scaled.points)
@@ -412,10 +413,10 @@ void test_conversion() {
     Options sizing;
     sizing.true_size = true;
     auto designed = convert({{"scaled.stl", ascii(scaled)}}, sizing);
-    check(designed.errors.empty() && designed.files.size() == 1 &&
-              std::abs(designed.files[0].diagnostics.volume - 6) < 1e-6,
+    check(designed.errors.empty() && designed.models.size() == 1 &&
+              std::abs(designed.models[0]->diagnostics().volume - 6) < 1e-6,
           "common design-size scale");
-    check(std::abs(designed.files[0].diagnostics.scale - 100. / 99) < 1e-8,
+    check(std::abs(designed.models[0]->diagnostics().scale - 100. / 99) < 1e-8,
           "99 percent scale hypothesis");
     const auto scaled_parts =
         "<model><resources><object id='1'>" + cube_xml() +
@@ -426,13 +427,14 @@ void test_conversion() {
     sizing.fuse = false;
     auto assembly =
         convert({{"scaled-parts.3mf", archive({{"3D/3dmodel.model", scaled_parts}})}}, sizing);
-    check(assembly.errors.empty() && assembly.files.size() == 1 &&
-              assembly.files[0].diagnostics.solids == 2 &&
-              std::abs(assembly.files[0].diagnostics.volume - 12) < 1e-6 &&
-              std::abs(assembly.files[0].diagnostics.scale - 100. / 99) < 1e-8,
+    check(assembly.errors.empty() && assembly.models.size() == 1 &&
+              assembly.models[0]->diagnostics().solids == 2 &&
+              std::abs(assembly.models[0]->diagnostics().volume - 12) < 1e-6 &&
+              std::abs(assembly.models[0]->diagnostics().scale - 100. / 99) < 1e-8,
           "multipart design sizing preserves part vertex ranges");
     STEPControl_Reader assembly_reader;
-    const auto &assembly_bytes = assembly.files[0].data;
+    auto assembly_step = assembly.models[0]->export_step();
+    const auto &assembly_bytes = assembly_step.data;
     std::istringstream assembly_stream(std::string(assembly_bytes.begin(), assembly_bytes.end()));
     check(assembly_reader.ReadStream("scaled-parts.step", assembly_stream) == IFSelect_RetDone &&
               assembly_reader.TransferRoots() > 0,
@@ -445,8 +447,8 @@ void test_conversion() {
     for (auto &point : metres.points)
         point = point.cwiseProduct(Vec(.123, .234, .345));
     auto units = convert({{"metres.stl", ascii(metres)}}, sizing);
-    check(units.errors.empty() && units.files.size() == 1 &&
-              units.files[0].diagnostics.scale == 1000,
+    check(units.errors.empty() && units.models.size() == 1 &&
+              units.models[0]->diagnostics().scale == 1000,
           "metre unit hypothesis");
 }
 } // namespace

@@ -1,10 +1,11 @@
-#include "internal.hpp"
+#include "model_internal.hpp"
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <STEPControl_Reader.hxx>
 #include <STEPControl_Writer.hxx>
 #include <ShapeAnalysis_ShapeTolerance.hxx>
+#include <ShapeFix_Shape.hxx>
 #include <Standard_Version.hxx>
 #if OCC_VERSION_HEX < 0x070800
 #include <StepData.hxx>
@@ -79,5 +80,42 @@ bool verify_step(const Bytes &bytes, const TopoDS_Shape &shape, double tolerance
         exported_info->surface_counts = std::move(info.surface_counts);
     }
     return true;
+}
+Bytes validated_step(const TopoDS_Shape &shape, double tolerance, Diagnostics &diagnostics) {
+    const double original_volume = diagnostics.volume;
+    const double allowed =
+        std::max(tolerance * tolerance * tolerance, std::abs(original_volume) * 1e-3 + 1e-3);
+    auto current = shape;
+    for (unsigned attempt = 0; attempt < 3; ++attempt) {
+        auto bytes = detail::write_step(current, tolerance, attempt == 0);
+        TopoDS_Shape imported;
+        if (detail::verify_step(bytes, current, tolerance, &diagnostics, &imported)) {
+            if (std::abs(diagnostics.volume - original_volume) > allowed)
+                throw std::runtime_error(
+                    "STEP topology repair changed the volume beyond the round-trip limit");
+            if (attempt)
+                diagnostics.repairs.push_back(
+                    "Recovered STEP serialization with a validated round trip");
+            return bytes;
+        }
+        if (imported.IsNull())
+            break;
+        ShapeFix_Shape heal(imported);
+        heal.SetPrecision(tolerance * .1);
+        heal.SetMaxTolerance(tolerance);
+        heal.Perform();
+        auto repaired = heal.Shape();
+        Diagnostics info;
+        if (repaired.IsNull() || !detail::inspect(repaired, info) ||
+            std::abs(info.volume - original_volume) > allowed) {
+            if (attempt == 0) {
+                current = shape;
+                continue;
+            }
+            break;
+        }
+        current = repaired;
+    }
+    throw std::runtime_error("STEP round-trip failed validation after bounded topology repair");
 }
 } // namespace stl2curves::detail

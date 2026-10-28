@@ -18,7 +18,13 @@ export function createServer() {
         response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
         response.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
       }
-      response.end(await readFile(target));
+      let bytes = await readFile(target);
+      if (target.startsWith(path.join(root, 'node_modules', 'three') + path.sep) && path.extname(target) === '.js') {
+        const prefix = isolated ? '/isolated' : '/ordinary';
+        bytes = Buffer.from(bytes.toString('utf8').replace(/from (['"])three\1/g,
+          `from '${prefix}/node_modules/three/build/three.module.js'`));
+      }
+      response.end(bytes);
     } catch { response.writeHead(404).end(); }
   });
 }

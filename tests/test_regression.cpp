@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
         }
         Bytes bytes((std::istreambuf_iterator<char>(in)), {});
         auto result = convert({{c.name, std::move(bytes)}}, options);
-        if (result.files.size() != 1 || !result.errors.empty()) {
+        if (result.models.size() != 1 || !result.errors.empty()) {
             std::cerr << "FAIL " << c.name;
             for (const auto &e : result.errors)
                 std::cerr << " " << e.message;
@@ -44,12 +44,23 @@ int main(int argc, char **argv) {
             ++failures;
             continue;
         }
-        const auto &d = result.files[0].diagnostics;
+        auto exported = result.models[0]->export_step();
+        const auto &d = exported.diagnostics;
         bool ok = d.valid && std::abs(d.volume - c.volume) <= c.error && d.faces <= c.faces;
         std::cout << (ok ? "PASS " : "FAIL ") << c.name << " volume error " << d.volume - c.volume
                   << " faces " << d.faces << " max " << c.faces << " fallback " << d.fallback
                   << '\n';
         failures += !ok;
+        try {
+            auto glb = result.models[0]->export_gltf();
+            if (glb.data.size() < 20)
+                throw std::runtime_error("Empty GLB output");
+            std::cout << "GLB " << c.name << " bytes " << glb.data.size() << " warnings "
+                      << glb.warnings.size() << '\n';
+        } catch (const std::exception &error) {
+            std::cerr << "FAIL GLB " << c.name << " " << error.what() << '\n';
+            ++failures;
+        }
         if (!ok) {
             for (const auto &reason : d.fallbacks)
                 std::cout << "  fallback: " << reason << '\n';

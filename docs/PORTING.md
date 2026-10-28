@@ -53,6 +53,12 @@ heuristic verbatim. Self-intersecting/nonmanifold meshes can still fail instead
 of yielding a solid. Full conversion parity must remain an explicit acceptance
 gate; build success and basic tests alone do not establish it.
 
-WASM compilation is performed through the manual GitHub workflow. Supplied
-artifacts have been tested in Node and browsers; see `VALIDATION.md` for scope,
-results and the JavaScript initialization correction required by the first build.
+WASM compilation is performed through the manual GitHub workflow. Runtime tests
+run separately against the compiled artifacts using the commands in the README.
+
+The 0.2.0 public API retains reconstructed OCCT models before serialization.
+`convert()` performs mesh preparation, reconstruction, fusion and native validity
+checks, then builds a BRepGraph. STEP validation/recovery runs only in
+`exportStep()` on a deep copy. GLB meshing and exact selection queries share the
+retained model's immutable graph identity; model release is explicit in WASM and
+RAII-owned in native C++. New graph functionality requires OCCT 8.0.1.

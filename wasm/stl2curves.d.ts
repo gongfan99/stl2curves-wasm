@@ -24,12 +24,30 @@ export interface Diagnostics {
   features: { kind: string; triangles: number; deviation: number; radius: number; pitch: number }[];
 }
 export interface OutputFile { name: string; data: Uint8Array<ArrayBuffer>; diagnostics: Diagnostics }
+export interface GraphId { kind: number; index: number }
+export interface UsagePathStep { node: GraphId; ref?: GraphId; stepIndex: number }
+export interface ShapeRef { modelId: number; brepgraph_id?: GraphId; usagePath?: UsagePathStep[] }
+export interface ModelInfo { modelId: number; name: string; root: ShapeRef; diagnostics: Diagnostics }
+export interface ConversionError { input: string; object: string; code: string; message: string; diagnostics?: Diagnostics }
+export interface GltfExportOptions {
+  /** Maximum linear deflection in model millimeters; default 0.1. */
+  linearDeflection?: number;
+  /** Angular deflection in radians; default 0.5. */
+  angularDeflection?: number;
+  faces?: boolean; edges?: boolean; vertices?: boolean;
+}
+export interface GltfFile { name: string; data: Uint8Array<ArrayBuffer>; warnings: string[] }
 export interface ConversionResult {
-  files: OutputFile[];
-  errors: { input: string; object: string; code: string; message: string; diagnostics?: Diagnostics }[];
+  models: ModelInfo[];
+  errors: ConversionError[];
 }
 export interface Stl2curvesModule {
   convert(inputs: InputFile[], options?: ConversionOptions): ConversionResult;
+  exportStep(modelId: number): OutputFile;
+  exportGltf(modelId: number, options?: GltfExportOptions): GltfFile;
+  getClosestPoints(a: ShapeRef, b: ShapeRef): { p1: [number, number, number]; p2: [number, number, number]; distance: number };
+  getShapeProperties(shape: ShapeRef): { properties: { name: string; value: number[] }[] };
+  releaseModel(modelId: number): boolean;
   buildInfo(): { version: string; occtVersion: string; threaded: boolean; workers: number };
   dispose(): void;
 }

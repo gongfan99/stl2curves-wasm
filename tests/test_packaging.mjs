@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const cmake = process.env.CMAKE_COMMAND || 'cmake';
-const ports = ['opencascade', 'eigen3', 'nanoflann', 'libzip', 'pugixml', 'zlib'];
+const ports = ['opencascade', 'eigen3', 'nanoflann', 'libzip', 'pugixml', 'zlib', 'tinygltf', 'nlohmann-json', 'stb'];
 const variants = ['threaded', 'single_thread'];
 const types = 'export interface Stl2curvesModule {}\n';
 

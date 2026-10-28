@@ -1,4 +1,4 @@
-#include "internal.hpp"
+#include "model_internal.hpp"
 #include "occt_error.hpp"
 #include <ShapeFix_Shape.hxx>
 #include <Standard_Failure.hxx>
@@ -51,49 +51,9 @@ std::map<unsigned, detail::Mesh> split_parts(detail::Mesh &mesh) {
     return parts;
 }
 
-Bytes validated_step(const TopoDS_Shape &shape, double tolerance, Diagnostics &diagnostics,
-                     TopoDS_Shape *exported = nullptr) {
-    const double original_volume = diagnostics.volume;
-    const double allowed =
-        std::max(tolerance * tolerance * tolerance, std::abs(original_volume) * 1e-3 + 1e-3);
-    auto current = shape;
-    for (unsigned attempt = 0; attempt < 3; ++attempt) {
-        auto bytes = detail::write_step(current, tolerance, attempt == 0);
-        TopoDS_Shape imported;
-        if (detail::verify_step(bytes, current, tolerance, &diagnostics, &imported)) {
-            if (std::abs(diagnostics.volume - original_volume) > allowed)
-                throw std::runtime_error(
-                    "STEP topology repair changed the volume beyond the round-trip limit");
-            if (attempt)
-                diagnostics.repairs.push_back(
-                    "Recovered STEP serialization with a validated round trip");
-            if (exported)
-                *exported = imported;
-            return bytes;
-        }
-        if (imported.IsNull())
-            break;
-        ShapeFix_Shape heal(imported);
-        heal.SetPrecision(tolerance * .1);
-        heal.SetMaxTolerance(tolerance);
-        heal.Perform();
-        auto repaired = heal.Shape();
-        Diagnostics info;
-        if (repaired.IsNull() || !detail::inspect(repaired, info) ||
-            std::abs(info.volume - original_volume) > allowed) {
-            if (attempt == 0) {
-                current = shape;
-                continue;
-            }
-            break;
-        }
-        current = repaired;
-    }
-    throw std::runtime_error("STEP round-trip failed validation after bounded topology repair");
-}
 } // namespace
 BuildInfo build_info() {
-    return {"0.1.0", OCC_VERSION_COMPLETE, STL2CURVES_THREADS != 0, detail::worker_count()};
+    return {"0.2.0", OCC_VERSION_COMPLETE, STL2CURVES_THREADS != 0, detail::worker_count()};
 }
 Result convert(const std::vector<InputFile> &inputs, const Options &options) {
     using namespace detail;
@@ -103,8 +63,7 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
         !std::isfinite(options.simplify) || (options.simplify < 0 && options.simplify != -1))
         throw std::invalid_argument(
             "Invalid tolerance, accuracy, time limit, or simplification option");
-    // STEP transfer still accesses OCCT process-wide state. Serialize public calls
-    // while internal fitting tasks remain parallel and independent.
+    // Serialize conversion calls while internal fitting tasks remain bounded.
     static std::mutex conversion_mutex;
     std::lock_guard<std::mutex> guard(conversion_mutex);
     Result result;
@@ -253,14 +212,11 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
                 auto shape = unite(shapes, ctx);
                 if (!inspect(shape, ctx.diagnostics))
                     throw std::runtime_error("Final solid failed validation");
-                trace("STEP serialization");
-                TopoDS_Shape exported;
-                trace("STEP re-import");
-                auto bytes = validated_step(shape, options.tolerance, ctx.diagnostics, &exported);
-                result.files.push_back({unique(safe_name(object.name)) + ".step", std::move(bytes),
-                                        std::move(ctx.diagnostics)});
+                auto model = ModelAccess::create(unique(safe_name(object.name)), shape,
+                                                 ctx.diagnostics, options.tolerance);
+                result.models.push_back(std::move(model));
                 if (!options.merge.empty())
-                    successful.push_back(exported);
+                    successful.push_back(shape);
             } catch (const Standard_Failure &e) {
                 result.errors.push_back({input.name, object.name, "geometry", failure_message(e),
                                          std::move(ctx.diagnostics)});
@@ -277,15 +233,15 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
         try {
             auto shape = unite(successful, ctx);
             inspect(shape, ctx.diagnostics);
-            auto bytes = validated_step(shape, options.tolerance, ctx.diagnostics);
-            result.files.push_back(
-                {unique(safe_name(std::filesystem::path(options.merge).stem().string())) + ".step",
-                 std::move(bytes), std::move(ctx.diagnostics)});
+            result.models.push_back(ModelAccess::create(
+                unique(safe_name(std::filesystem::path(options.merge).stem().string())), shape,
+                ctx.diagnostics, options.tolerance));
         } catch (const Standard_Failure &e) {
-            result.errors.push_back({"", "merge", "export", failure_message(e, "Merge failure"),
+            result.errors.push_back({"", "merge", "geometry", failure_message(e, "Merge failure"),
                                      std::move(ctx.diagnostics)});
         } catch (const std::exception &e) {
-            result.errors.push_back({"", "merge", "export", e.what(), std::move(ctx.diagnostics)});
+            result.errors.push_back(
+                {"", "merge", "geometry", e.what(), std::move(ctx.diagnostics)});
         }
     }
     return result;

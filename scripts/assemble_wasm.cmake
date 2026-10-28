@@ -28,7 +28,7 @@ foreach(variant threaded single_thread)
     file(COPY ${workers} DESTINATION "${destination}")
   endif()
 
-  foreach(port opencascade eigen3 nanoflann libzip pugixml)
+  foreach(port opencascade eigen3 nanoflann libzip pugixml tinygltf nlohmann-json stb)
     if(NOT EXISTS "${source}/licenses/${port}/copyright")
       message(FATAL_ERROR "Missing ${variant} dependency notice: ${port}")
     endif()

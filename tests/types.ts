@@ -4,9 +4,14 @@ async function example(input: Uint8Array) {
   const module = await createStl2curves({ locateFile: (name, prefix) => prefix + name });
   const options: ConversionOptions = { accuracy: 0.1, tolerance: 0.01, trueSize: false };
   const result = module.convert([{ name: 'part.stl', data: input }], options);
-  for (const file of result.files) {
-    const transferable: ArrayBuffer = file.data.buffer;
-    const valid: boolean = file.diagnostics.valid;
+  for (const model of result.models) {
+    const step = module.exportStep(model.modelId);
+    const glb = module.exportGltf(model.modelId, { linearDeflection: 0.1 });
+    const transferable: ArrayBuffer = glb.data.buffer;
+    const valid: boolean = step.diagnostics.valid;
+    module.getShapeProperties(model.root);
+    module.getClosestPoints(model.root, model.root);
+    module.releaseModel(model.modelId);
     void transferable;
     void valid;
   }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(stl2curves VERSION 0.1.0 LANGUAGES CXX)
+project(stl2curves VERSION 0.2.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -22,6 +22,11 @@ if(EMSCRIPTEN)
 endif()
 
 find_package(OpenCASCADE CONFIG REQUIRED)
+set(occt_version "${OpenCASCADE_MAJOR_VERSION}.${OpenCASCADE_MINOR_VERSION}.${OpenCASCADE_MAINTENANCE_VERSION}")
+if(occt_version VERSION_LESS 8.0.1)
+  message(FATAL_ERROR "The model API requires OpenCascade 8.0.1 or later")
+endif()
+find_path(TINYGLTF_INCLUDE_DIR tiny_gltf.h REQUIRED)
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(pugixml CONFIG REQUIRED)
 find_package(nanoflann CONFIG REQUIRED)
@@ -38,8 +43,9 @@ endif()
 
 add_library(stl2curves_core STATIC
   cpp/numeric.cpp cpp/mesh.cpp cpp/read3mf.cpp cpp/detect.cpp
-  cpp/advanced.cpp cpp/build.cpp cpp/step.cpp cpp/converter.cpp)
+  cpp/advanced.cpp cpp/build.cpp cpp/step.cpp cpp/converter.cpp cpp/model.cpp cpp/gltf.cpp)
 target_include_directories(stl2curves_core PUBLIC include PRIVATE cpp ${OpenCASCADE_INCLUDE_DIR})
+target_include_directories(stl2curves_core SYSTEM PRIVATE ${TINYGLTF_INCLUDE_DIR})
 target_link_libraries(stl2curves_core PUBLIC
   Eigen3::Eigen pugixml::pugixml nanoflann::nanoflann ${zip_target}
   TKernel TKMath TKG2d TKG3d TKGeomBase TKBRep TKGeomAlgo TKTopAlgo
@@ -91,6 +97,11 @@ elseif(STL2CURVES_BUILD_TESTS)
   target_include_directories(test_advanced PRIVATE cpp ${OpenCASCADE_INCLUDE_DIR})
   target_link_libraries(test_advanced PRIVATE stl2curves_core)
   add_test(NAME advanced COMMAND test_advanced)
+  add_executable(test_models tests/test_models.cpp)
+  target_include_directories(test_models PRIVATE cpp ${OpenCASCADE_INCLUDE_DIR})
+  target_include_directories(test_models SYSTEM PRIVATE ${TINYGLTF_INCLUDE_DIR})
+  target_link_libraries(test_models PRIVATE stl2curves_core)
+  add_test(NAME models COMMAND test_models)
   set_tests_properties(advanced PROPERTIES TIMEOUT 120)
   add_executable(generate_fixtures tests/generate_fixtures.cpp)
   target_link_libraries(generate_fixtures PRIVATE stl2curves_core)

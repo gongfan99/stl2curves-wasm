@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -49,12 +50,73 @@ struct OutputFile {
     Bytes data;
     Diagnostics diagnostics;
 };
+struct GraphId {
+    int kind = 0;
+    std::uint32_t index = 0;
+    bool operator==(const GraphId &other) const {
+        return kind == other.kind && index == other.index;
+    }
+};
+struct UsagePathStep {
+    GraphId node;
+    std::optional<GraphId> ref;
+    int step_index = -1;
+    bool operator==(const UsagePathStep &other) const {
+        return node == other.node && ref == other.ref && step_index == other.step_index;
+    }
+};
+struct ShapeRef {
+    std::uint32_t model_id = 0;
+    std::optional<GraphId> brepgraph_id;
+    std::optional<std::vector<UsagePathStep>> usage_path;
+};
+struct GltfExportOptions {
+    double linear_deflection = 0.1, angular_deflection = 0.5;
+    bool faces = true, edges = true, vertices = true;
+};
+struct GltfFile {
+    std::string name;
+    Bytes data;
+    std::vector<std::string> warnings;
+};
+struct ClosestPoints {
+    std::vector<double> p1, p2;
+    double distance = 0;
+};
+struct ShapeProperty {
+    std::string name;
+    std::vector<double> value;
+};
+namespace detail {
+struct ModelAccess;
+}
+class Model {
+  public:
+    ~Model();
+    Model(const Model &) = delete;
+    Model &operator=(const Model &) = delete;
+    std::uint32_t id() const;
+    const std::string &name() const;
+    const Diagnostics &diagnostics() const;
+    ShapeRef root() const;
+    OutputFile export_step() const;
+    GltfFile export_gltf(const GltfExportOptions &options = {}) const;
+    std::vector<ShapeProperty> get_shape_properties(const ShapeRef &selection) const;
+    ClosestPoints get_closest_points(const ShapeRef &selection, const Model &other,
+                                     const ShapeRef &other_selection) const;
+
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    explicit Model(std::unique_ptr<Impl> impl);
+    friend struct detail::ModelAccess;
+};
 struct Failure {
     std::string input, object, code, message;
     std::optional<Diagnostics> diagnostics = std::nullopt;
 };
 struct Result {
-    std::vector<OutputFile> files;
+    std::vector<std::shared_ptr<Model>> models;
     std::vector<Failure> errors;
 };
 struct BuildInfo {
@@ -63,7 +125,7 @@ struct BuildInfo {
     unsigned workers;
 };
 BuildInfo build_info();
-// Partial success is represented by files and per-object errors together.
+// Partial success is represented by retained models and per-object errors together.
 // Configuration errors throw std::invalid_argument before processing inputs.
 Result convert(const std::vector<InputFile> &inputs, const Options &options = {});
 } // namespace stl2curves

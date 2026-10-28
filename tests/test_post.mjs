@@ -23,7 +23,7 @@ test('conversion errors release the busy guard and disposal terminates the pool 
   const module = { convert() {
     if (++calls === 1) throw new Error('conversion failed');
     assert.throws(() => module.convert([]), /already running/);
-    assert.throws(() => module.dispose(), /cancel an active conversion/);
+    assert.throws(() => module.dispose(), /cancel an active model operation/);
     return 'recovered';
   } };
   vm.runInNewContext(source, {
@@ -43,4 +43,30 @@ test('pthread bootstrap does not require application Embind exports', () => {
   assert.equal(module.convert, undefined);
   assert.equal(typeof module.dispose, 'function');
   module.dispose();
+});
+
+test('all model APIs reject use after disposal and disposal releases models first', () => {
+  const events = [];
+  const module = { _clearModels() { events.push('release'); } };
+  const methods = ['convert', 'exportStep', 'exportGltf', 'getClosestPoints', 'getShapeProperties', 'releaseModel'];
+  for (const name of methods) module[name] = (...args) => args;
+  vm.runInNewContext(source, { Module: module, PThread: { terminateAllThreads() { events.push('threads'); } } });
+  assert.equal(Object.keys(module.exportGltf(1)[1]).length, 0);
+  module.dispose();
+  module.dispose();
+  assert.deepEqual(events, ['release', 'threads']);
+  for (const name of methods) assert.throws(() => module[name](1), /disposed/);
+});
+
+test('native error results become JS exceptions after C++ has returned', () => {
+  let calls = 0;
+  const module = { exportStep() {
+    if (calls++ === 0) return { __stl2curvesError: { name: 'TypeError', message: 'Released model' } };
+    if (calls === 2) return { __stl2curvesError: { name: 'Error', message: 'STEP failed' } };
+    return 'recovered';
+  } };
+  vm.runInNewContext(source, { Module: module });
+  assert.throws(() => module.exportStep(1), error => error.name === 'TypeError' && error.message === 'Released model');
+  assert.throws(() => module.exportStep(1), /STEP failed/);
+  assert.equal(module.exportStep(1), 'recovered');
 });

@@ -17,6 +17,9 @@ Dependencies are resolved through the vcpkg registry at
 | libzip | BSD-3-Clause | https://libzip.org/ |
 | pugixml | MIT | https://github.com/zeux/pugixml |
 | zlib (libzip dependency) | Zlib | https://zlib.net/ |
+| TinyGLTF 3.0.0 | MIT, BSL-1.0, Zlib | https://github.com/syoyo/tinygltf |
+| nlohmann-json (TinyGLTF dependency) | MIT | https://github.com/nlohmann/json |
+| stb (TinyGLTF dependency; image support disabled) | MIT or public domain | https://github.com/nothings/stb |
 | vcpkg port definitions and patches | MIT | https://github.com/microsoft/vcpkg |
 
 The OpenCascade overlay retains vcpkg's pinned source hash and upstream patches;
@@ -24,3 +27,6 @@ local changes select headless toolkits and retain exception handling. Build
 scripts and manifests in this repository identify the dependency sources and
 configuration needed to rebuild the distributed modules. Packaging copies
 vcpkg's installed dependency copyright files into `dist/licenses/`.
+
+Three.js (MIT, https://github.com/mrdoob/three.js) is a development dependency
+used for GLB loading and picking tests; it is not included in the deployment archive.
