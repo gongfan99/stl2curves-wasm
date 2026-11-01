@@ -8,6 +8,7 @@
     "check:types": "tsc --noEmit",
     "test:post": "node --test tests/test_post.mjs",
     "test:package": "node --test tests/test_packaging.mjs",
+    "test:app": "node tests/test_app.mjs",
     "test:wasm:threaded": "node wasm/test_node.mjs threaded",
     "test:wasm:single_thread": "node wasm/test_node.mjs single_thread",
     "test:browser": "node wasm/test_browser.mjs"

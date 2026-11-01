@@ -1,0 +1,883 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090d24">
+  <title>STL &amp; 3MF to STEP Converter | A Tool by L2CAD</title>
+  <meta name="description" content="Convert STL and 3MF meshes to STEP or GLB in your browser. A helper tool by L2CAD, the language-to-CAD app. Files stay on your device.">
+  <link rel="icon" type="image/svg+xml" href="./l2cad_logo.svg">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="L2CAD">
+  <meta property="og:title" content="STL &amp; 3MF to STEP Converter | A Tool by L2CAD">
+  <meta property="og:description" content="Convert STL and 3MF meshes to STEP or GLB with local browser processing. Explore L2CAD, the separate language-to-CAD app, at l2cad.com.">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="STL &amp; 3MF to STEP Converter | A Tool by L2CAD">
+  <meta name="twitter:description" content="Convert STL and 3MF meshes to STEP or GLB with local browser processing. Explore L2CAD, the separate language-to-CAD app, at l2cad.com.">
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "STL & 3MF to STEP Converter",
+      "applicationCategory": "DesignApplication",
+      "operatingSystem": "Web browser",
+      "description": "A mesh-to-CAD helper tool by L2CAD that converts STL and 3MF files to STEP or GLB locally in your browser. L2CAD is a separate language-to-CAD application available at https://l2cad.com.",
+      "publisher": {
+        "@type": "Organization",
+        "name": "L2CAD",
+        "url": "https://l2cad.com"
+      },
+      "featureList": ["STL and 3MF import", "Mesh to CAD reconstruction", "STEP and GLB export", "3D model inspection", "Local browser processing"]
+    }
+  </script>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #f0f3ff; background: #080c20; font-synthesis: none; --muted: #98a6c8; --line: #ffffff12; --blue: #1689ff; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 350px; min-height: 100vh; background: radial-gradient(ellipse at 76% 5%, #25285c80, transparent 51%), radial-gradient(ellipse at 8% 100%, #122b6f70, transparent 50%), #080c20; }
+    button, input, select { font: inherit; }
+    button, select, .file-button { cursor: pointer; }
+    button { color: inherit; }
+    button:disabled { cursor: default; opacity: .4; }
+    button:focus-visible, input:focus-visible, select:focus-visible, .file-button:focus-within, summary:focus-visible { outline: 2px solid #68c4ff; outline-offset: 4px; }
+    [hidden] { display: none !important; }
+    .app { max-width: 1920px; margin: auto; padding: 30px 34px 20px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 0 2px 26px; }
+    .brand { display: flex; align-items: center; gap: 12px; text-decoration: none; color: inherit; }
+    .brand-icon { width: 40px; height: 40px; display: block; flex-shrink: 0; object-fit: contain; }
+    svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+    .brand-name { font-size: 18px; font-weight: 750; letter-spacing: -.5px; }
+    .brand-caption { color: var(--muted); font-size: 11px; letter-spacing: 1.5px; margin-top: 2px; text-transform: uppercase; }
+    .runtime { display: flex; align-items: center; gap: 8px; color: #becae1; font-size: 12px; border: 1px solid var(--line); border-radius: 30px; padding: 9px 13px; background: #10172f; }
+    .dot { height: 7px; width: 7px; border-radius: 50%; background: #2ed5ad; box-shadow: 0 0 12px #2ed5ad50; }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+    .panel { border: 1px solid var(--line); border-radius: 22px; background: linear-gradient(140deg, #111b3df2, #0b1028f7 65%); box-shadow: 0 12px 45px #00000018; min-width: 0; overflow: hidden; }
+    .panel-header { display: flex; align-items: center; justify-content: space-between; padding: 21px 22px 17px; gap: 10px; }
+    .panel-title { display: flex; align-items: center; gap: 11px; }
+    .number { display: grid; place-items: center; width: 29px; height: 29px; background: #163567; border: 1px solid #3062a24d; border-radius: 10px; color: #75baff; font-size: 11px; font-weight: 700; }
+    .number.green { background: #103c3c; color: #4bdbbc; border-color: #217a644d; }
+    h2 { font-size: 15px; font-weight: 650; margin: 0; letter-spacing: -.2px; }
+    .pill { color: #91a3c8; font-size: 10px; border: 1px solid #ffffff12; border-radius: 6px; padding: 4px 7px; }
+    .toolbar { min-height: 79px; padding: 0 22px 17px; display: flex; align-items: center; gap: 11px; border-bottom: 1px solid var(--line); }
+    .field { display: flex; flex-direction: column; gap: 7px; color: var(--muted); font-size: 10px; min-width: 0; }
+    .field input, .field select { border: 1px solid #ffffff17; color: #e0e9ff; background: #0a122b; border-radius: 9px; height: 37px; padding: 0 10px; font-size: 12px; width: 95px; }
+    .field select { width: 97px; }
+    .field input:invalid { border-color: #f5a783; }
+    .file-button { height: 37px; padding: 0 13px; background: #ffffff0b; border: 1px solid #ffffff24; border-radius: 9px; display: flex; align-items: center; gap: 7px; font-size: 11px; color: #e4ecff; white-space: nowrap; position: relative; }
+    .file-button svg { width: 15px; }
+    .file-button:hover { background: #ffffff15; border-color: #5e89cc; }
+    .file-button input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+    .fuse-field { height: 37px; display: flex; align-items: center; gap: 6px; color: #c7d4ed; font-size: 11px; white-space: nowrap; }
+    input[type=checkbox] { accent-color: #278dff; width: 15px; height: 15px; margin: 0; }
+    .primary { border: 1px solid #3c9cff; background: linear-gradient(135deg, #258eff, #1465e5); border-radius: 9px; height: 37px; padding: 0 15px; font-size: 11px; font-weight: 650; display: inline-flex; align-items: center; justify-content: center; gap: 6px; box-shadow: 0 4px 15px #0075ff1a; white-space: nowrap; }
+    .primary:hover:not(:disabled) { filter: brightness(1.13); }
+    .primary svg { width: 14px; }
+    .convert { margin-left: auto; }
+    #conversion-form { position: relative; }
+    .settings-button { height: 37px !important; width: 37px !important; }
+    .settings-popup { position: absolute; left: 16px; top: calc(100% - 5px); z-index: 15; width: min(300px, calc(100% - 32px)); padding: 17px; background: #172345; border: 1px solid #3d5076; border-radius: 13px; box-shadow: 0 12px 30px #0006; }
+    .settings-popup h3 { font-size: 13px; margin: 0 0 16px; }
+    .settings-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 15px 12px; }
+    .settings-fields .field input, .settings-fields .field select { width: 100%; }
+    .settings-popup .fuse-field { align-self: end; }
+    .setting-label, .fuse-field > label { display: flex; align-items: center; gap: 6px; }
+    .setting-info { display: inline-grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 1px solid #7895c0; border-radius: 50%; background: transparent; color: #b6d8ff; font-size: 10px; font-weight: 700; line-height: 1; }
+    .setting-info:hover, .setting-info:focus-visible { color: white; border-color: #b6d8ff; background: #2c5285; }
+    .setting-description { display: none; position: absolute; left: 12px; right: 12px; z-index: 20; padding: 10px 12px; color: #d5e5fa; background: #08152bf5; border: 1px solid #56759e; border-radius: 9px; box-shadow: 0 6px 20px #0005; font-size: 11px; line-height: 1.6; font-weight: 400; pointer-events: none; }
+    .setting-help:hover .setting-description, .setting-help:focus-within .setting-description { display: block; }
+    .settings-done { display: block; margin: 14px 0 0 auto; border: 0; background: none; color: #80c9ff; font-size: 11px; padding: 5px; }
+    .output-toolbar { justify-content: space-between; align-items: center; }
+    .output-message { color: var(--muted); font-size: 11px; line-height: 1.5; display: flex; align-items: center; gap: 7px; }
+    .output-message svg { width: 15px; color: #6c8cc9; }
+    .download { position: relative; }
+    .menu { position: absolute; right: 0; top: 44px; z-index: 10; width: 140px; padding: 6px; background: #172345; border: 1px solid #3d5076; box-shadow: 0 12px 30px #0006; border-radius: 12px; }
+    .menu button { width: 100%; padding: 11px 12px; border: 0; background: none; text-align: left; border-radius: 7px; font-size: 12px; display: flex; justify-content: space-between; }
+    .menu button:hover { background: #ffffff0c; }
+    .viewport { height: clamp(350px, 54vh, 760px); min-height: 350px; position: relative; overflow: hidden; background: radial-gradient(ellipse at 50% 45%, #1729537a, transparent 68%), #0a1226; }
+    .viewport > canvas.render { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+    .viewport.dragging { box-shadow: inset 0 0 0 2px #369bff; }
+    .viewport.dragging::after { content: 'Drop one STL or 3MF file'; pointer-events: none; position: absolute; inset: 0; background: #0c275be6; display: grid; place-items: center; font-size: 17px; color: #cce8ff; z-index: 8; }
+    .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; text-align: center; pointer-events: none; }
+    .empty-icon { height: 76px; width: 76px; border-radius: 24px; display: grid; place-items: center; border: 1px solid #477bbb42; color: #6ba9ef; background: linear-gradient(145deg, #20478566, #14264b55); margin-bottom: 20px; transform: rotate(-7deg); box-shadow: 0 8px 35px #0002; }
+    .empty-icon svg { width: 35px; height: 35px; transform: rotate(7deg); stroke-width: 1; }
+    .empty h3 { font-size: 15px; font-weight: 550; margin: 0 0 9px; color: #cad7ed; }
+    .empty p { color: #778bad; font-size: 12px; line-height: 1.8; margin: 0; }
+    .empty small { display: block; color: #597196; font-size: 10px; margin-top: 15px; }
+    .axis { position: absolute; bottom: 13px; left: 13px; width: 82px; height: 82px; pointer-events: none; }
+    .view-tools { position: absolute; right: 14px; top: 14px; display: flex; gap: 6px; }
+    .icon-button { display: grid; place-items: center; height: 31px; width: 31px; border-radius: 9px; border: 1px solid #ffffff17; background: #121d38cc; color: #a6b9db; }
+    .icon-button svg { width: 15px; }
+    .icon-button:hover { background: #263c65; color: white; }
+    .shape-tooltip, .measurement-readout, .distance-label { position: absolute; z-index: 5; pointer-events: none; border: 1px solid #557da56b; background: #0a1735ed; color: #d4e6ff; border-radius: 9px; box-shadow: 0 5px 20px #0004; font-size: 11px; line-height: 1.7; white-space: pre-line; padding: 8px 11px; }
+    .shape-tooltip { max-width: calc(100% - 16px); }
+    .measurement-readout { right: 16px; bottom: 16px; max-width: calc(100% - 116px); pointer-events: auto; }
+    .measurement-readout button { border: 0; background: none; color: #80c9ff; font-size: 10px; padding: 4px 0 0; }
+    .distance-label { padding: 3px 8px; color: #ffd295; border-color: #ad7f43; transform: translate(-50%, -100%); white-space: nowrap; }
+    .panel-footer { min-height: 54px; padding: 14px 22px; display: flex; align-items: center; justify-content: space-between; gap: 14px; font-size: 11px; color: var(--muted); }
+    .file-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 70%; color: #b7c7e2; }
+    .stats { white-space: nowrap; font-variant-numeric: tabular-nums; font-size: 10px; }
+    .statusbar { display: flex; align-items: center; gap: 10px; min-height: 48px; margin-top: 18px; padding: 13px 17px; border: 1px solid var(--line); border-radius: 13px; background: #101a3399; color: #a4b5d2; font-size: 12px; line-height: 1.6; }
+    .statusbar .dot { width: 6px; height: 6px; flex-shrink: 0; }
+    .statusbar[data-state=error] { border-color: #f8a8803d; color: #f0b9a0; }
+    .statusbar[data-state=error] .dot { background: #f5a783; }
+    .statusbar[data-state=busy] .dot { background: transparent; width: 12px; height: 12px; border: 2px solid #315389; border-top-color: #61bcff; animation: spin 1s linear infinite; box-shadow: none; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .diagnostics { margin: 12px 2px 0; font-size: 11px; color: #97aaca; }
+    .diagnostics summary { cursor: pointer; padding: 5px 0; }
+    .diagnostics pre { font-family: inherit; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; background: #0c152e; padding: 15px; border-radius: 10px; }
+    .footer { display: flex; justify-content: space-between; gap: 15px; font-size: 10px; color: #657a9f; padding: 21px 2px 0; line-height: 1.7; }
+    .footer a { color: #91a5ce; text-decoration: none; }
+    @media (min-width: 1600px) { .app { padding: 36px 48px 22px; } .viewport { height: 62vh; } }
+    @media (max-width: 1180px) { .app { padding: 22px 18px; } .toolbar { flex-wrap: wrap; min-height: 79px; gap: 9px; padding: 0 16px 14px; align-content: center; } .output-toolbar { align-content: center; } .panel-header { padding: 18px 16px 16px; } .field input { width: 83px; } .field select { width: 88px; } .convert { margin-left: 0; } }
+    @media (max-width: 760px) { .workspace { grid-template-columns: 1fr; } .runtime { font-size: 10px; padding: 8px 10px; } .topbar { gap: 10px; } .toolbar { min-height: 79px; } .viewport { height: 420px; } .footer { flex-direction: column; gap: 4px; } }
+    @media (max-width: 430px) { .app { padding: 18px 12px; } .brand-caption { font-size: 9px; } .brand-name { font-size: 16px; } .brand-icon { width: 34px; height: 34px; } .toolbar { gap: 8px; } .file-button { padding: 0 10px; } .field input { width: 74px; } .field select { width: 80px; } .viewport { height: 350px; } }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/" } }
+  </script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <a class="brand" href="https://l2cad.com" aria-label="L2CAD home">
+        <img class="brand-icon" src="./l2cad_logo.svg" alt="" width="40" height="40">
+        <div><div class="brand-name">L2CAD</div><div class="brand-caption">Mesh to CAD workspace</div></div>
+      </a>
+      <div class="runtime"><span class="dot"></span><span id="runtime">Local processing</span></div>
+    </header>
+    <main class="workspace">
+      <section class="panel" aria-labelledby="input-heading">
+        <div class="panel-header"><div class="panel-title"><span class="number">01</span><h2 id="input-heading">Input mesh</h2></div><span class="pill">STL / 3MF</span></div>
+        <form id="conversion-form" class="toolbar" novalidate>
+          <label class="file-button"><svg viewBox="0 0 24 24"><path d="M12 16V4m-4 4 4-4 4 4 M4 15v5h16v-5"/></svg>Open file<input id="file" type="file" accept=".stl,.3mf" aria-label="Open one STL or 3MF file"></label>
+          <div class="settings">
+            <button id="settings" type="button" class="icon-button settings-button" title="Conversion settings" aria-label="Conversion settings" aria-expanded="false" aria-controls="settings-popup"><svg viewBox="0 0 24 24"><path d="m9 3-.6 2.4-2 .9L4.2 5.6 2.7 8.2l1.8 1.7-.2 2.2-1.8 1.7L4 16.4l2.3-.7 2 .9L9 19h3l.6-2.4 2-.9 2.3.7 1.5-2.6-1.8-1.7.2-2.2 1.8-1.7L17 5.6l-2.3.7-2-.9L12 3Z" transform="translate(1.5 1)"/><circle cx="12" cy="12" r="3"/></svg></button>
+            <div id="settings-popup" class="settings-popup" role="dialog" aria-labelledby="settings-title" hidden>
+              <h3 id="settings-title">Conversion settings</h3>
+              <div class="settings-fields">
+                <div class="field"><div class="setting-label"><label for="accuracy">Accuracy · mm</label><span class="setting-help"><button type="button" class="setting-info" aria-label="About accuracy" aria-describedby="accuracy-description">i</button><span id="accuracy-description" class="setting-description" role="tooltip">Target surface-fitting accuracy in millimeters. Smaller values request a closer fit and may increase processing time. Default: 0.1 mm.</span></span></div><input id="accuracy" type="number" min="0.000001" step="any" value="0.1" required aria-describedby="accuracy-description"></div>
+                <div class="field"><div class="setting-label"><label for="simplify">Simplify</label><span class="setting-help"><button type="button" class="setting-info" aria-label="About simplification" aria-describedby="simplify-description">i</button><span id="simplify-description" class="setting-description" role="tooltip">Reduce mesh triangles before reconstruction. Automatic uses a 0.005 mm tolerance above one million triangles. Off disables simplification; Custom lets you choose the tolerance.</span></span></div><select id="simplify" aria-describedby="simplify-description"><option value="-1">Automatic</option><option value="0">Off</option><option value="custom">Custom…</option></select></div>
+                <div class="field" id="custom-simplify-field" hidden><div class="setting-label"><label for="custom-simplify">Tolerance · mm</label><span class="setting-help"><button type="button" class="setting-info" aria-label="About simplification tolerance" aria-describedby="tolerance-description">i</button><span id="tolerance-description" class="setting-description" role="tooltip">Mesh simplification tolerance in millimeters. Larger values allow more simplification and can remove fine detail. This setting is used only in Custom mode.</span></span></div><input id="custom-simplify" type="number" min="0.000001" step="any" value="0.005" aria-describedby="tolerance-description" disabled></div>
+                <div class="fuse-field"><label for="fuse"><input id="fuse" type="checkbox" aria-describedby="fuse-description">Fuse</label><span class="setting-help"><button type="button" class="setting-info" aria-label="About fusion" aria-describedby="fuse-description">i</button><span id="fuse-description" class="setting-description" role="tooltip">Apply Boolean fusion to reconstructed bodies and object parts. Turn off to keep them separate. Default: off.</span></span></div>
+              </div>
+              <button id="settings-done" class="settings-done" type="button">Done</button>
+            </div>
+          </div>
+          <button class="primary convert" id="convert" type="submit" disabled>Convert<svg viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></button>
+        </form>
+        <div class="viewport" id="input-view" aria-label="Input 3D viewer and file drop area">
+          <div class="empty" id="input-empty"><div class="empty-icon"><svg viewBox="0 0 40 40"><path d="m20 4 14 8v16L20 36 6 28V12Z M6 12l14 8 14-8 M20 20v16 M13 8l14 8 M6 20l14 8 14-8"/></svg></div><h3>A mesh is where it starts.</h3><p>Drop one STL or 3MF file here<br>or use Open file above.</p><small>Your files stay on this device.</small></div>
+          <canvas class="axis" aria-label="Input orientation: X red, Y green, Z blue"></canvas>
+          <div class="view-tools"><button type="button" class="icon-button reset-view" title="Fit both models" aria-label="Fit both models"><svg viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5 M8 8h8v8H8Z"/></svg></button></div>
+        </div>
+        <div class="panel-footer"><span class="file-name" id="input-name">No file selected</span><span class="stats" id="input-stats">— triangles</span></div>
+      </section>
+      <section class="panel" aria-labelledby="output-heading">
+        <div class="panel-header"><div class="panel-title"><span class="number green">02</span><h2 id="output-heading">Reconstructed model</h2></div><span class="pill" id="output-badge">glTF preview</span></div>
+        <div class="toolbar output-toolbar"><span class="output-message"><svg viewBox="0 0 24 24"><path d="m9 8-4 4 4 4m6-8 4 4-4 4m-2-12-2 24"/></svg><span id="output-message">Convert to reveal your model</span></span>
+          <div class="download"><button class="primary" id="download" type="button" aria-expanded="false" aria-controls="download-menu" disabled><svg viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5"/></svg>Download<svg viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></svg></button>
+            <div class="menu" id="download-menu" hidden><button type="button" data-format="glb">GLB</button><button type="button" data-format="step">STEP</button></div>
+          </div>
+        </div>
+        <div class="viewport" id="output-view" aria-label="Reconstructed 3D viewer">
+          <div class="empty" id="output-empty"><div class="empty-icon"><svg viewBox="0 0 40 40"><path d="m20 4 14 8v16L20 36 6 28V12Z M6 12l14 8 14-8 M20 20v16"/><path d="m13 16 7-4 7 4 M13 24l7 4 7-4"/></svg></div><h3>See the reconstruction.</h3><p>Your converted model appears here<br>with smooth surfaces and clean edges.</p></div>
+          <canvas class="axis" aria-label="Output orientation: X red, Y green, Z blue"></canvas>
+          <div class="view-tools">
+            <button type="button" class="icon-button reset-view" title="Fit both models" aria-label="Fit both models"><svg viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5 M8 8h8v8H8Z"/></svg></button>
+          </div>
+          <div id="shape-tooltip" class="shape-tooltip" role="tooltip" hidden></div>
+          <div id="measurement-readout" class="measurement-readout" role="status" aria-live="polite" hidden><div id="measurement-text"></div><button type="button" id="clear-measurement">Clear measurement</button></div>
+          <div id="distance-label" class="distance-label" hidden></div>
+        </div>
+        <div class="panel-footer"><span class="file-name" id="output-name">Awaiting conversion</span><span class="stats" id="output-stats">— faces</span></div>
+      </section>
+    </main>
+    <div class="statusbar" id="status" role="status" aria-live="polite" hidden><span class="dot"></span><span id="status-text">Ready when you are. Open a file to get started.</span></div>
+    <details class="diagnostics" id="diagnostics" hidden><summary>Conversion details</summary><pre id="diagnostics-text"></pre></details>
+    <footer class="footer"><span>Private by design. Preview and conversion run entirely in your browser.</span><span>Drag to orbit · Scroll to zoom · Right-drag to pan</span></footer>
+  </div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { unzipSync } from 'three/addons/libs/fflate.module.js';
+
+    const $ = id => document.getElementById(id);
+    const formatNumber = n => new Intl.NumberFormat().format(n);
+    let sourceFile = null, sourceBytes = null, busy = false, fileRevision = 0;
+    let worker = null, workerUrl = null, requestId = 0, modelId = null, glbBytes = null;
+    const pending = new Map();
+    let normalization = null;
+    const views = [];
+    const sharedCamera = new THREE.PerspectiveCamera(35, 1, .001, 1000);
+    sharedCamera.position.set(2.3, 1.6, 2.6);
+    const sharedTarget = new THREE.Vector3();
+    const keyLightOffset = new THREE.Vector3(-3, 5, 8).normalize();
+    const inspection = { objects: [], hover: null, selected: [], properties: new Map(),
+      pickObjects: [], pickSources: new Map(), dimension: 1, token: 0, down: null, distanceGroup: null, midpoint: null };
+    const raycaster = new THREE.Raycaster();
+    const inspectionMaterials = {
+      hover: { face: new THREE.MeshBasicMaterial({ color: 0xffb020, side: THREE.DoubleSide }), edge: new THREE.LineBasicMaterial({ color: 0xffb020, depthTest: false }), vertex: new THREE.PointsMaterial({ color: 0xffb020, size: 10, sizeAttenuation: false, depthTest: false }) },
+      selected: { face: new THREE.MeshStandardMaterial({ color: 0x5077ff, emissive: 0x182d67, side: THREE.DoubleSide, roughness: .45 }), edge: new THREE.LineBasicMaterial({ color: 0x7b9aff, depthTest: false }), vertex: new THREE.PointsMaterial({ color: 0x7b9aff, size: 11, sizeAttenuation: false, depthTest: false }) },
+    };
+
+    function status(text, state = 'ready') {
+      $('status-text').textContent = text;
+      $('status').dataset.state = state;
+    }
+    function setBusy(value) {
+      busy = value;
+      $('convert').disabled = value || !sourceBytes;
+      $('convert').textContent = value ? 'Converting…' : 'Convert';
+      $('download').disabled = value || !modelId;
+      $('download-menu').hidden = true;
+      $('download').setAttribute('aria-expanded', 'false');
+      for (const id of ['accuracy', 'simplify', 'custom-simplify', 'fuse']) $(id).disabled = value;
+      $('custom-simplify').disabled = value || $('simplify').value !== 'custom';
+      $('settings').disabled = value;
+      if (value) closeSettings();
+      if (value) { clearHover(); clearMeasurement(); }
+      $('measurement-readout').hidden = value || !modelId;
+    }
+
+    // Keep synchronous native operations off the rendering/UI thread. This
+    // inline Worker is a module so the loader can select either WASM variant.
+    function ensureWorker() {
+      if (worker) return;
+      const loaderUrl = 'https://static.fgong.dev/stl2curves-wasm/v0.1.0/loader.mjs';
+      const code = `
+        let instance;
+        async function module() {
+          return instance ??= import(${JSON.stringify(loaderUrl)}).then(m => m.default);
+        }
+        self.onmessage = async ({ data: request }) => {
+          const { id, operation, payload } = request;
+          try {
+            const m = await module();
+            let result;
+            if (operation === 'convert') {
+              const converted = m.convert([{ name: payload.name, data: new Uint8Array(payload.bytes) }], payload.options);
+              if (!converted.models.length) throw new Error(converted.errors.map(e => e.message).join('; ') || 'No models were reconstructed.');
+              if (converted.errors.some(e => e.object === 'merge')) {
+                for (const model of converted.models) m.releaseModel(model.modelId);
+                throw new Error('Could not assemble the output compound: ' + converted.errors.filter(e => e.object === 'merge').map(e => e.message).join('; '));
+              }
+              // merge appends a compound containing all successful input objects.
+              const selected = converted.models[converted.models.length - 1];
+              try {
+                const glb = m.exportGltf(selected.modelId);
+                result = { model: selected, models: converted.models, errors: converted.errors,
+                  glb, info: m.buildInfo() };
+              } catch (error) {
+                for (const model of converted.models) m.releaseModel(model.modelId);
+                throw error;
+              }
+              for (const model of converted.models) if (model.modelId !== selected.modelId) m.releaseModel(model.modelId);
+            } else if (operation === 'step') result = m.exportStep(payload.modelId);
+            else if (operation === 'properties') result = m.getShapeProperties(payload.shape);
+            else if (operation === 'distance') result = m.getClosestPoints(payload.a, payload.b);
+            else if (operation === 'release') result = m.releaseModel(payload.modelId);
+            else throw new Error('Unknown operation.');
+            const buffer = result?.glb?.data?.buffer ?? result?.data?.buffer;
+            self.postMessage({ id, result }, buffer ? [buffer] : []);
+          } catch (error) { self.postMessage({ id, error: error?.message || String(error) }); }
+        };
+      `;
+      workerUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+      worker = new Worker(workerUrl, { type: 'module', name: 'L2CAD-conversion' });
+      worker.onmessage = ({ data }) => {
+        const task = pending.get(data.id);
+        if (!task) return;
+        pending.delete(data.id);
+        if (data.error) task.reject(new Error(data.error));
+        else task.resolve(data.result);
+      };
+      worker.onerror = event => {
+        const message = event.message || 'The conversion worker stopped unexpectedly.';
+        for (const task of pending.values()) task.reject(new Error(message));
+        pending.clear();
+        worker.terminate(); worker = null;
+        URL.revokeObjectURL(workerUrl); workerUrl = null;
+        modelId = null; glbBytes = null;
+        resetInspection();
+        $('download').disabled = true;
+        status(`The conversion worker stopped: ${message}`, 'error');
+      };
+    }
+    function request(operation, payload) {
+      ensureWorker();
+      return new Promise((resolve, reject) => {
+        const id = ++requestId;
+        pending.set(id, { resolve, reject });
+        worker.postMessage({ id, operation, payload });
+      });
+    }
+
+    function drawAxis(view) {
+      const canvas = view.axis, dpr = Math.min(devicePixelRatio, 2);
+      canvas.width = canvas.height = 82 * dpr;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      const inverse = view.camera.quaternion.clone().invert();
+      const directions = [
+        { label: 'X', color: '#f28b9d', vector: new THREE.Vector3(1, 0, 0) },
+        { label: 'Y', color: '#70d8b1', vector: new THREE.Vector3(0, 0, -1) },
+        { label: 'Z', color: '#68b6ff', vector: new THREE.Vector3(0, 1, 0) },
+      ].map(a => ({ ...a, vector: a.vector.applyQuaternion(inverse) })).sort((a, b) => a.vector.z - b.vector.z);
+      ctx.fillStyle = '#0a1226aa'; ctx.beginPath(); ctx.arc(41, 41, 37, 0, Math.PI * 2); ctx.fill();
+      for (const axis of directions) {
+        const x = 41 + axis.vector.x * 27, y = 41 - axis.vector.y * 27;
+        ctx.strokeStyle = axis.color; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(41, 41); ctx.lineTo(41 + axis.vector.x * 18, 41 - axis.vector.y * 18); ctx.stroke();
+        ctx.fillStyle = axis.color; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(axis.label, x, y + .5);
+      }
+    }
+    function render() {
+      for (const view of views) {
+        view.key.target.position.copy(sharedTarget);
+        view.key.position.copy(keyLightOffset).applyQuaternion(sharedCamera.quaternion).add(sharedTarget);
+        view.renderer.render(view.scene, view.camera); drawAxis(view);
+      }
+      positionDistanceLabel();
+    }
+    function resizeViews() {
+      if (!views.length) return;
+      // Use identical render dimensions, including when fractional grid widths
+      // round differently or the responsive layout gives the panes more room.
+      // Center any spare pixels instead of stretching either projection.
+      const width = Math.max(1, Math.min(...views.map(view => view.element.clientWidth)));
+      const height = Math.max(1, Math.min(...views.map(view => view.element.clientHeight)));
+      sharedCamera.aspect = width / height;
+      sharedCamera.updateProjectionMatrix();
+      for (const view of views) {
+        const w = view.element.clientWidth, h = view.element.clientHeight;
+        view.renderer.setSize(w, h, false);
+        view.renderer.setViewport(Math.floor((w - width) / 2), Math.floor((h - height) / 2), width, height);
+      }
+      render();
+    }
+    function createView(id) {
+      const element = $(id), scene = new THREE.Scene();
+      const camera = sharedCamera;
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.25;
+      renderer.domElement.className = 'render';
+      renderer.domElement.setAttribute('aria-label', id === 'input-view' ? 'Rotate input model' : 'Rotate reconstructed model');
+      renderer.domElement.tabIndex = 0;
+      element.prepend(renderer.domElement);
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target = sharedTarget;
+      controls.minDistance = .03; controls.maxDistance = 100;
+      controls.update();
+      scene.add(new THREE.HemisphereLight(0xf7f8f8, 0xf7f8f8, 1.18));
+      const key = new THREE.DirectionalLight(0xfff9ed, 1.8);
+      scene.add(key, key.target);
+      const fill = new THREE.DirectionalLight(0xc8d8e5, .7);
+      fill.position.set(-6, 2, 4); scene.add(fill);
+      const content = new THREE.Group(); scene.add(content);
+      const view = { element, scene, camera, renderer, controls, key, content, axis: element.querySelector('.axis'), model: null };
+      views.push(view);
+      // Both controllers operate on the same camera and target. Copying camera
+      // states between independent controllers can introduce projection drift.
+      controls.addEventListener('change', render);
+      controls.addEventListener('start', clearHover);
+      new ResizeObserver(resizeViews).observe(element);
+      return view;
+    }
+    function disposeObject(object) {
+      const geometries = new Set(), materials = new Set();
+      object.traverse(child => {
+        if (child.geometry) geometries.add(child.geometry);
+        if (child.material) for (const material of [].concat(child.material)) materials.add(material);
+      });
+      for (const geometry of geometries) geometry.dispose();
+      for (const material of materials) material.dispose();
+    }
+    function clearView(view) {
+      if (view === views[1]) resetInspection();
+      if (view.model) { view.content.remove(view.model); disposeObject(view.model); view.model = null; }
+    }
+    function fitViews() {
+      const box = new THREE.Box3();
+      for (const view of views) if (view.model) box.union(new THREE.Box3().setFromObject(view.content));
+      if (box.isEmpty()) return;
+      const sphere = box.getBoundingSphere(new THREE.Sphere());
+      const aspect = sharedCamera.aspect;
+      const angle = Math.atan(Math.tan(THREE.MathUtils.degToRad(35 / 2)) * Math.min(aspect, 1));
+      const distance = sphere.radius / Math.sin(angle) * 1.18;
+      sharedCamera.position.copy(sphere.center).add(new THREE.Vector3(1, .7, 1.2).normalize().multiplyScalar(distance));
+      sharedTarget.copy(sphere.center);
+      sharedCamera.near = Math.max(distance / 1000, .00001); sharedCamera.far = Math.max(distance * 100, 100);
+      sharedCamera.updateProjectionMatrix(); views[0].controls.update();
+      render();
+    }
+    function normalizeView(view) {
+      view.content.scale.setScalar(normalization.scale);
+      view.content.position.copy(normalization.center).multiplyScalar(-normalization.scale);
+    }
+
+    // Geometry-only 3MF preview: honor per-model units, build/component
+    // transforms and external model references without loading textures.
+    function preview3mf(buffer) {
+      const archive = unzipSync(new Uint8Array(buffer)), decoder = new TextDecoder(), cache = new Map();
+      const children = (node, name) => [...(node?.children || [])].filter(n => n.localName === name);
+      const child = (node, name) => children(node, name)[0];
+      const attr = (node, name) => [...node.attributes].find(a => a.localName === name)?.value;
+      const path = name => {
+        const parts = name.replaceAll('\\', '/').replace(/^\/+/, '').split('/'), result = [];
+        for (const part of parts) { if (part === '..') result.pop(); else if (part && part !== '.') result.push(part); }
+        return result.join('/');
+      };
+      function xml(name) {
+        if (!archive[name]) throw new Error(`Missing 3MF part: ${name}`);
+        const document = new DOMParser().parseFromString(decoder.decode(archive[name]), 'application/xml');
+        if (document.getElementsByTagName('parsererror').length) throw new Error(`Invalid XML in ${name}`);
+        return document.documentElement;
+      }
+      const units = { micron: .001, millimeter: 1, centimeter: 10, inch: 25.4, foot: 304.8, meter: 1000 };
+      function model(name) {
+        if (!cache.has(name)) {
+          const root = xml(name), scale = units[root.getAttribute('unit') || 'millimeter'];
+          if (!scale) throw new Error('Unsupported 3MF unit.');
+          cache.set(name, { root, scale, objects: new Map(children(child(root, 'resources'), 'object').map(o => [o.getAttribute('id'), o])) });
+        }
+        return cache.get(name);
+      }
+      function transform(text, unit) {
+        if (!text) return new THREE.Matrix4();
+        const a = text.trim().split(/\s+/).map(Number);
+        if (a.length !== 12 || !a.every(Number.isFinite)) throw new Error('Invalid 3MF transform.');
+        return new THREE.Matrix4().set(a[0], a[3], a[6], a[9] * unit, a[1], a[4], a[7], a[10] * unit, a[2], a[5], a[8], a[11] * unit, 0, 0, 0, 1);
+      }
+      const rel = children(xml('_rels/.rels'), 'Relationship').find(r => r.getAttribute('Type')?.endsWith('/3dmodel'));
+      const rootFile = rel ? path(rel.getAttribute('Target')) : Object.keys(archive).find(n => /^3D\/[^/]+\.model$/i.test(n));
+      if (!rootFile) throw new Error('No 3MF model part found.');
+      const kinds = new Map();
+      if (archive['Metadata/model_settings.config']) {
+        for (const obj of children(xml('Metadata/model_settings.config'), 'object')) for (const part of children(obj, 'part')) {
+          kinds.set(`${obj.getAttribute('id')}/${part.getAttribute('id')}`, part.getAttribute('subtype') || 'normal_part');
+        }
+      }
+      const root = new THREE.Group(), active = new Set();
+      const material = new THREE.MeshStandardMaterial({ color: 0x8aa9d8, roughness: .48, metalness: .12, side: THREE.DoubleSide });
+      function collect(file, id, matrix, top, depth = 0) {
+        const key = `${file}#${id}`;
+        if (depth > 128 || active.has(key)) throw new Error('Cyclic or excessively nested 3MF components.');
+        active.add(key);
+        const m = model(file), object = m.objects.get(id);
+        if (!object) throw new Error(`Missing 3MF object ${id}`);
+        if (!object.hasAttribute('type') || object.getAttribute('type') === 'model') {
+          const mesh = child(object, 'mesh');
+          if (mesh) {
+            const vertices = children(child(mesh, 'vertices'), 'vertex').map(v => {
+              const a = ['x', 'y', 'z'].map(k => v.hasAttribute(k) ? Number(v.getAttribute(k)) : NaN);
+              if (!a.every(Number.isFinite)) throw new Error('Invalid 3MF vertex.');
+              return new THREE.Vector3(...a).multiplyScalar(m.scale).applyMatrix4(matrix);
+            });
+            const positions = [];
+            for (const triangle of children(child(mesh, 'triangles'), 'triangle')) {
+              const indices = ['v1', 'v2', 'v3'].map(k => triangle.hasAttribute(k) ? Number(triangle.getAttribute(k)) : NaN);
+              if (!indices.every(i => Number.isInteger(i) && i >= 0 && i < vertices.length)) throw new Error('Invalid 3MF triangle index.');
+              if (matrix.determinant() < 0) [indices[1], indices[2]] = [indices[2], indices[1]];
+              for (const i of indices) positions.push(vertices[i].x, vertices[i].y, vertices[i].z);
+            }
+            const geometry = new THREE.BufferGeometry(); geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3)); geometry.computeVertexNormals();
+            root.add(new THREE.Mesh(geometry, material));
+          }
+          for (const component of children(child(object, 'components'), 'component')) {
+            const componentId = component.getAttribute('objectid'), kind = kinds.get(`${top}/${componentId}`);
+            if (kind && kind !== 'normal_part') continue;
+            collect(attr(component, 'path') ? path(attr(component, 'path')) : file, componentId,
+              matrix.clone().multiply(transform(component.getAttribute('transform'), m.scale)), top, depth + 1);
+          }
+        }
+        active.delete(key);
+      }
+      try {
+        const main = model(rootFile);
+        for (const item of children(child(main.root, 'build'), 'item')) {
+          const id = item.getAttribute('objectid'); collect(rootFile, id, transform(item.getAttribute('transform'), main.scale), id);
+        }
+        if (!root.children.length) throw new Error('3MF contains no printable mesh objects.');
+        return root;
+      } catch (error) { disposeObject(root); material.dispose(); throw error; }
+    }
+
+    function selectionKind(object) {
+      const kind = object.userData?.brepgraph_id?.kind;
+      return kind === 2 && object.isMesh ? 'face' : kind === 4 && object.isLine ? 'edge' : kind === 5 && object.isPoints ? 'vertex' : null;
+    }
+    function shapeReference(object) {
+      const { modelId: id, brepgraph_id, usagePath } = object.userData;
+      if (id !== modelId || !brepgraph_id || !Array.isArray(usagePath)) throw new Error('This selection does not belong to the live model.');
+      return { modelId: id, brepgraph_id, usagePath };
+    }
+    const mm = value => `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(Math.abs(value) < 1e-7 ? 0 : value)} mm`;
+    function showMeasurement(text) {
+      $('measurement-text').textContent = text;
+      $('measurement-readout').hidden = busy || !modelId;
+    }
+    function clearHover(redraw = true) {
+      if (inspection.hover) {
+        const { object, material, order } = inspection.hover;
+        object.material = material; object.renderOrder = order;
+        inspection.hover = null;
+      }
+      $('shape-tooltip').hidden = true;
+      if (redraw) render();
+    }
+    function clearMeasurement() {
+      inspection.token++;
+      clearHover(false);
+      for (const item of inspection.selected) { item.object.material = item.material; item.object.renderOrder = item.order; }
+      inspection.selected = [];
+      if (inspection.distanceGroup) {
+        views[1]?.scene.remove(inspection.distanceGroup); disposeObject(inspection.distanceGroup); inspection.distanceGroup = null;
+      }
+      inspection.midpoint = null; $('distance-label').hidden = true;
+      showMeasurement('Select the first face, edge, or vertex.'); render();
+    }
+    function resetInspection() {
+      clearMeasurement();
+      for (const proxy of inspection.pickSources.keys()) proxy.geometry.dispose();
+      inspection.pickObjects = []; inspection.pickSources.clear();
+      inspection.objects = []; inspection.properties.clear(); inspection.down = null;
+      $('measurement-readout').hidden = true;
+      if (views[1]) views[1].renderer.domElement.style.cursor = '';
+    }
+    function attachInspection() {
+      views[1].model.updateWorldMatrix(true, true);
+      views[1].model.traverse(object => { if (selectionKind(object)) inspection.objects.push(object); });
+      const bounds = new THREE.Box3();
+      for (const object of inspection.objects) {
+        object.visible = true;
+        if (selectionKind(object) === 'face') bounds.union(new THREE.Box3().setFromObject(object, true));
+        if (selectionKind(object) === 'face') inspection.pickObjects.push(object);
+        else {
+          // Three.js line/point raycasting divides precision by object.scale,
+          // without including parent scales. Bake the complete GLB + display
+          // transforms into CPU-only picking geometry so thresholds stay in
+          // world units. The display and native selection references stay intact.
+          const geometry = object.geometry.clone().applyMatrix4(object.matrixWorld);
+          const proxy = object.isPoints ? new THREE.Points(geometry, object.material) :
+            object.isLineSegments ? new THREE.LineSegments(geometry, object.material) : new THREE.Line(geometry, object.material);
+          inspection.pickObjects.push(proxy); inspection.pickSources.set(proxy, object);
+        }
+      }
+      const size = bounds.getSize(new THREE.Vector3());
+      inspection.dimension = Math.max(size.x, size.y, size.z, .001);
+      raycaster.params.Line.threshold = inspection.dimension * .006;
+      raycaster.params.Points.threshold = inspection.dimension * .008;
+      views[1].renderer.domElement.style.cursor = 'crosshair';
+      showMeasurement('Select the first face, edge, or vertex.');
+    }
+    function pickSubshape(event) {
+      const view = views[1];
+      if (busy || !modelId || !view.model) return null;
+      const rect = view.renderer.domElement.getBoundingClientRect(), viewport = view.renderer.getViewport(new THREE.Vector4());
+      const x = (event.clientX - rect.left) * view.element.clientWidth / rect.width - viewport.x;
+      const y = (rect.bottom - event.clientY) * view.element.clientHeight / rect.height - viewport.y;
+      if (x < 0 || y < 0 || x > viewport.z || y > viewport.w) return null;
+      raycaster.setFromCamera(new THREE.Vector2(2 * x / viewport.z - 1, 2 * y / viewport.w - 1), sharedCamera);
+      view.model.updateWorldMatrix(true, true);
+      const hits = raycaster.intersectObjects(inspection.pickObjects, false).map(hit =>
+        inspection.pickSources.has(hit.object) ? { ...hit, object: inspection.pickSources.get(hit.object) } : hit);
+      const priority = { vertex: 3, edge: 2, face: 1 };
+      return hits.sort((a, b) => priority[selectionKind(b.object)] - priority[selectionKind(a.object)] || a.distance - b.distance)[0] || null;
+    }
+    function tooltip(text, event) {
+      const element = $('shape-tooltip'), rect = $('output-view').getBoundingClientRect();
+      element.textContent = text; element.hidden = false;
+      element.style.left = `${Math.max(8, Math.min(event.clientX - rect.left + 14, rect.width - element.offsetWidth - 8))}px`;
+      element.style.top = `${Math.max(8, Math.min(event.clientY - rect.top + 14, rect.height - element.offsetHeight - 8))}px`;
+    }
+    function hoverSubshape(event) {
+      if (event.buttons || busy) { clearHover(); return; }
+      const hit = pickSubshape(event), object = hit?.object;
+      if (!object) { clearHover(); return; }
+      const kind = selectionKind(object);
+      if (inspection.hover?.object !== object) {
+        clearHover(false);
+        inspection.hover = { object, material: object.material, order: object.renderOrder };
+        if (!inspection.selected.some(item => item.object === object)) {
+          object.material = inspectionMaterials.hover[kind]; object.renderOrder = kind === 'face' ? 1 : 20;
+        }
+      }
+      render();
+      if (kind !== 'edge') return;
+      const pointer = { clientX: event.clientX, clientY: event.clientY }, currentModel = modelId;
+      void (async () => {
+        try {
+          if (!inspection.properties.has(object)) inspection.properties.set(object, request('properties', { shape: shapeReference(object) }));
+          const result = await inspection.properties.get(object);
+          if (inspection.hover?.object !== object || modelId !== currentModel || busy) return;
+          const p = Object.fromEntries(result.properties.map(({ name, value }) => [name, value]));
+          const curveName = { 2: 'ellipse', 3: 'hyperbola', 4: 'parabola', 5: 'bezier', 6: 'bspline', 7: 'offset', 8: 'other curve' }[p.curve_type?.[0]];
+          const radius = p.radius?.[0], angle = p.angle_degrees?.[0], length = p.length?.[0];
+          const circular = Number.isFinite(radius) && Number.isFinite(angle);
+          if (!curveName && !circular && !Number.isFinite(length)) return;
+          const lines = [curveName || (circular ? `Radius: ${radius.toFixed(2)} mm` : `Length: ${length.toFixed(2)} mm`)];
+          if (!curveName && circular && Math.abs(angle - 360) > 1e-4) lines.push(`Arc angle: ${angle.toFixed(2)}°`);
+          tooltip(lines.join('\n'), pointer);
+        } catch { /* Hover properties are optional; selection stays usable. */ }
+      })();
+    }
+    function modelPointToScene(point) {
+      return views[1].content.localToWorld(new THREE.Vector3(point[0], point[2], -point[1]).multiplyScalar(.001));
+    }
+    function positionDistanceLabel() {
+      if (!inspection.midpoint || !views[1]) return;
+      const projected = inspection.midpoint.clone().project(sharedCamera), label = $('distance-label');
+      label.hidden = projected.z < -1 || projected.z > 1 || Math.abs(projected.x) > 1 || Math.abs(projected.y) > 1;
+      if (label.hidden) return;
+      const view = views[1], viewport = view.renderer.getViewport(new THREE.Vector4());
+      const rect = view.renderer.domElement.getBoundingClientRect();
+      label.style.left = `${(viewport.x + (projected.x + 1) * viewport.z / 2) * rect.width / view.element.clientWidth}px`;
+      label.style.top = `${(view.element.clientHeight - viewport.y - (projected.y + 1) * viewport.w / 2) * rect.height / view.element.clientHeight - 10}px`;
+    }
+    function drawDistance(result) {
+      const p1 = modelPointToScene(result.p1), p2 = modelPointToScene(result.p2), group = new THREE.Group();
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([p1, p2]), new THREE.LineBasicMaterial({ color: 0xffbb66, depthTest: false }));
+      line.renderOrder = 30; group.add(line);
+      for (const point of [p1, p2]) {
+        const marker = new THREE.Points(new THREE.BufferGeometry().setFromPoints([point]), new THREE.PointsMaterial({ color: 0xffbb66, size: 9, sizeAttenuation: false, depthTest: false }));
+        marker.renderOrder = 31; group.add(marker);
+      }
+      inspection.distanceGroup = group; inspection.midpoint = p1.clone().add(p2).multiplyScalar(.5);
+      views[1].scene.add(group); $('distance-label').textContent = mm(result.distance); render();
+    }
+    async function selectSubshape(hit) {
+      if (inspection.selected.length === 2) clearMeasurement();
+      clearHover(false);
+      const object = hit.object, kind = selectionKind(object), existing = inspection.selected.find(item => item.object === object);
+      inspection.selected.push({ object, kind, shape: shapeReference(object), material: existing?.material || object.material, order: existing?.order ?? object.renderOrder });
+      object.material = inspectionMaterials.selected[kind]; object.renderOrder = kind === 'face' ? 1 : 20;
+      render();
+      if (inspection.selected.length === 1) { showMeasurement(`${kind[0].toUpperCase() + kind.slice(1)} selected. Select the second subshape.`); return; }
+      const [first, second] = inspection.selected, token = ++inspection.token;
+      showMeasurement('Calculating exact minimum distance…');
+      try {
+        const result = await request('distance', { a: first.shape, b: second.shape });
+        if (token !== inspection.token || busy) return;
+        drawDistance(result);
+        showMeasurement(`${first.kind} to ${second.kind}: ${mm(result.distance)}\n` +
+          `ΔX: ${mm(Math.abs(result.p2[0] - result.p1[0]))} · ΔY: ${mm(Math.abs(result.p2[1] - result.p1[1]))} · ΔZ: ${mm(Math.abs(result.p2[2] - result.p1[2]))}\nClick another subshape to start again.`);
+      } catch (error) { if (token === inspection.token) showMeasurement(`Measurement failed: ${error.message}`); }
+    }
+    function bindInspection() {
+      const canvas = views[1].renderer.domElement;
+      canvas.addEventListener('pointermove', hoverSubshape);
+      canvas.addEventListener('pointerleave', () => { inspection.down = null; clearHover(); });
+      canvas.addEventListener('pointercancel', () => { inspection.down = null; clearHover(); });
+      canvas.addEventListener('pointerdown', event => {
+        if (event.button === 0) inspection.down = { x: event.clientX, y: event.clientY, id: event.pointerId, moved: false };
+      });
+      canvas.addEventListener('pointermove', event => {
+        if (inspection.down && Math.hypot(event.clientX - inspection.down.x, event.clientY - inspection.down.y) > 4) inspection.down.moved = true;
+      });
+      canvas.addEventListener('pointerup', event => {
+        const down = inspection.down; inspection.down = null;
+        if (busy || event.button !== 0 || !down || down.id !== event.pointerId || down.moved || Math.hypot(event.clientX - down.x, event.clientY - down.y) > 4) return;
+        const hit = pickSubshape(event);
+        if (hit) selectSubshape(hit).catch(error => showMeasurement(`Selection failed: ${error.message}`));
+      });
+      $('clear-measurement').addEventListener('click', clearMeasurement);
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') clearMeasurement();
+      });
+    }
+
+    function sampleCubeFile() {
+      const geometry = new THREE.BoxGeometry(20, 20, 20).toNonIndexed();
+      const positions = geometry.attributes.position, normals = geometry.attributes.normal;
+      const count = positions.count / 3, buffer = new ArrayBuffer(84 + count * 50), data = new DataView(buffer);
+      new Uint8Array(buffer, 0, 80).set(new TextEncoder().encode('L2CAD sample cube'));
+      data.setUint32(80, count, true);
+      for (let triangle = 0; triangle < count; triangle++) {
+        const offset = 84 + triangle * 50;
+        for (let axis = 0; axis < 3; axis++) data.setFloat32(offset + axis * 4, normals.array[triangle * 9 + axis], true);
+        for (let coordinate = 0; coordinate < 9; coordinate++) data.setFloat32(offset + 12 + coordinate * 4, positions.array[triangle * 9 + coordinate], true);
+      }
+      geometry.dispose();
+      return new File([buffer], 'sample-cube.stl', { type: 'application/octet-stream' });
+    }
+
+    async function loadFile(file) {
+      if (!file) return;
+      if (!/\.(stl|3mf)$/i.test(file.name)) { status('Choose one .stl or .3mf file.', 'error'); return; }
+      if (busy) { status('Please wait for the current operation to finish before opening another file.', 'busy'); return; }
+      const revision = ++fileRevision;
+      setBusy(true);
+      status(`Opening ${file.name}…`, 'busy');
+      let object;
+      try {
+        const buffer = await file.arrayBuffer();
+        if (revision !== fileRevision) return;
+        if (/\.stl$/i.test(file.name)) {
+          const geometry = new STLLoader().parse(buffer);
+          // STL facet normals are often absent, zero, or inconsistent.
+          geometry.computeVertexNormals();
+          object = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0x8aa9d8, roughness: .48, metalness: .12, side: THREE.DoubleSide }));
+        } else object = preview3mf(buffer);
+        // Use the same mm/Z-up -> m/Y-up convention as the GLB exporter.
+        const wrapper = new THREE.Group(); wrapper.rotation.x = -Math.PI / 2; wrapper.scale.setScalar(.001); wrapper.add(object); object = wrapper;
+        const bounds = new THREE.Box3().setFromObject(object), size = bounds.getSize(new THREE.Vector3());
+        if (bounds.isEmpty() || ![...bounds.min, ...bounds.max].every(Number.isFinite) || size.length() === 0) throw new Error('The file contains no finite, drawable mesh.');
+        if (modelId) { await request('release', { modelId }); modelId = null; }
+        glbBytes = null; clearView(views[0]); clearView(views[1]);
+        sourceFile = file; sourceBytes = new Uint8Array(buffer);
+        normalization = { center: bounds.getCenter(new THREE.Vector3()), scale: 1 / Math.max(size.x, size.y, size.z) };
+        views[0].model = object; views[0].content.add(object); normalizeView(views[0]); normalizeView(views[1]);
+        let triangles = 0;
+        object.traverse(o => { if (o.isMesh) triangles += (o.geometry.index?.count ?? o.geometry.attributes.position.count) / 3; });
+        $('input-empty').hidden = true; $('output-empty').hidden = false;
+        $('input-name').textContent = file.name; $('input-name').title = file.name;
+        $('input-stats').textContent = `${formatNumber(triangles)} triangles`;
+        $('output-name').textContent = 'Awaiting conversion'; $('output-stats').textContent = '— faces';
+        $('output-message').textContent = 'Ready to reconstruct'; $('output-badge').textContent = 'glTF preview';
+        $('diagnostics').hidden = true;
+        setBusy(false); fitViews();
+        status(`${file.name} loaded. Adjust the options, then select Convert.`);
+      } catch (error) {
+        if (object && object !== views[0].model) disposeObject(object);
+        if (revision === fileRevision) status(`Could not open file: ${error.message}`, 'error');
+      } finally { $('file').value = ''; setBusy(false); }
+    }
+
+    async function convert(event) {
+      event.preventDefault();
+      if (busy || !sourceBytes) return;
+      if (!$('conversion-form').checkValidity()) { openSettings(); $('conversion-form').reportValidity(); return; }
+      const accuracy = Number($('accuracy').value);
+      const simplify = $('simplify').value === 'custom' ? Number($('custom-simplify').value) : Number($('simplify').value);
+      if (!(accuracy > 0) || !Number.isFinite(accuracy) || !Number.isFinite(simplify) || ($('simplify').value === 'custom' && simplify <= 0)) {
+        status('Accuracy and custom simplification tolerance must be positive finite numbers.', 'error'); return;
+      }
+      setBusy(true);
+      const started = performance.now();
+      status('Reconstructing CAD geometry… You can keep rotating the views.', 'busy');
+      let nextModel = null, nextObject = null;
+      try {
+        const result = await request('convert', { name: sourceFile.name, bytes: sourceBytes.buffer,
+          options: { accuracy, simplify, fuse: $('fuse').checked, merge: sourceFile.name.replace(/\.[^.]+$/, '') } });
+        nextModel = result.model.modelId;
+        const gltf = await new GLTFLoader().parseAsync(result.glb.data.buffer, '');
+        nextObject = gltf.scene;
+        nextObject.traverse(o => {
+          if (o.isMesh) { o.material.color.setHex(0x80c9e4); o.material.metalness = .15; o.material.roughness = .37; }
+          if (o.isLine) { o.material.color.setHex(0x244762); o.material.transparent = true; o.material.opacity = .6; }
+          if (o.isPoints) { o.material.color.setHex(0x9fe4ff); o.material.size = 2; o.material.sizeAttenuation = false; }
+        });
+        if (modelId) await request('release', { modelId });
+        clearView(views[1]); views[1].model = nextObject; views[1].content.add(nextObject); normalizeView(views[1]);
+        modelId = nextModel; glbBytes = result.glb.data;
+        attachInspection();
+        $('output-empty').hidden = true;
+        const originals = result.models.length > 1 ? result.models.slice(0, -1) : result.models;
+        const faces = result.model.diagnostics.faces, solids = result.model.diagnostics.solids;
+        const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+        $('output-name').textContent = `${sourceFile.name.replace(/\.[^.]+$/, '')}.glb`;
+        $('output-stats').textContent = `${formatNumber(faces)} faces · ${formatNumber(solids)} solids`;
+        $('output-message').textContent = `Reconstructed in ${elapsed}s`;
+        $('output-badge').textContent = result.model.diagnostics.valid ? 'Valid CAD' : 'Check details';
+        $('runtime').textContent = result.info.threaded ? `Threaded · ${result.info.workers} workers` : 'Single-thread · local';
+        const notes = [...result.errors.map(e => `${e.object || e.input}: ${e.message}`), ...result.glb.warnings,
+          ...originals.flatMap(m => [...m.diagnostics.warnings, ...m.diagnostics.repairs.map(r => `Repair: ${r}`), ...m.diagnostics.fallbacks.map(r => `Fallback: ${r}`)])];
+        $('diagnostics').hidden = false;
+        $('diagnostics-text').textContent = [`${originals.length} object(s) · ${faces} faces · ${solids} solids`,
+          `Accuracy: ${accuracy} mm · Simplify: ${simplify === -1 ? 'automatic' : simplify === 0 ? 'off' : `${simplify} mm`} · Fuse: ${$('fuse').checked ? 'on' : 'off'}`,
+          ...originals.map(m => `${m.name}: ${m.diagnostics.faces} faces; valid: ${m.diagnostics.valid}; fallback: ${m.diagnostics.fallback}`),
+          ...notes].join('\n');
+        render();
+        status(notes.length ? `Conversion finished in ${elapsed}s with ${notes.length} notice(s). See Conversion details.` : `Conversion complete in ${elapsed}s. Your model is ready to download.`);
+      } catch (error) {
+        if (nextModel && nextModel !== modelId) await request('release', { modelId: nextModel }).catch(() => {});
+        if (nextObject && nextObject !== views[1].model) disposeObject(nextObject);
+        status(`Conversion failed: ${error.message}`, 'error');
+      } finally { setBusy(false); }
+    }
+
+    function save(bytes, name, type) {
+      const url = URL.createObjectURL(new Blob([bytes], { type }));
+      const a = document.createElement('a'); a.href = url; a.download = name; document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+    async function download(format) {
+      $('download-menu').hidden = true; $('download').setAttribute('aria-expanded', 'false');
+      if (busy || !modelId || !glbBytes) return;
+      const stem = sourceFile.name.replace(/\.[^.]+$/, '');
+      if (format === 'glb') save(glbBytes, `${stem}.glb`, 'model/gltf-binary');
+      else if (format === 'step') {
+        setBusy(true); status('Exporting and validating STEP…', 'busy');
+        try {
+          const result = await request('step', { modelId });
+          save(result.data, `${stem}.step`, 'application/step');
+          status(result.diagnostics.fallback ? 'STEP downloaded using validated recovery geometry. The preview model is unchanged.' : 'STEP exported, validated, and downloaded.');
+        } catch (error) { status(`STEP export failed: ${error.message}`, 'error'); }
+        finally { setBusy(false); }
+      }
+    }
+
+    function openSettings() {
+      $('settings-popup').hidden = false; $('settings').setAttribute('aria-expanded', 'true'); $('accuracy').focus();
+    }
+    function closeSettings(restoreFocus = false) {
+      const wasOpen = !$('settings-popup').hidden;
+      $('settings-popup').hidden = true; $('settings').setAttribute('aria-expanded', 'false');
+      if (restoreFocus && wasOpen) $('settings').focus();
+    }
+    $('settings').addEventListener('click', () => $('settings-popup').hidden ? openSettings() : closeSettings(true));
+    $('settings-done').addEventListener('click', () => closeSettings(true));
+    for (const button of document.querySelectorAll('.setting-info')) {
+      const positionDescription = () => {
+        const popup = $('settings-popup').getBoundingClientRect(), icon = button.getBoundingClientRect();
+        button.nextElementSibling.style.top = `${icon.bottom - popup.top + 7}px`;
+      };
+      button.addEventListener('pointerenter', positionDescription);
+      button.addEventListener('focus', positionDescription);
+    }
+    document.addEventListener('click', event => { if (!event.target.closest('.settings')) closeSettings(); });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') closeSettings(true); });
+    $('file').addEventListener('change', event => { if (event.target.files.length === 1) loadFile(event.target.files[0]); });
+    $('conversion-form').addEventListener('submit', convert);
+    $('simplify').addEventListener('change', () => {
+      const custom = $('simplify').value === 'custom'; $('custom-simplify-field').hidden = !custom; $('custom-simplify').required = custom;
+      $('custom-simplify').disabled = !custom || busy;
+    });
+    for (const id of ['accuracy', 'simplify', 'custom-simplify', 'fuse']) $(id).addEventListener('change', () => {
+      if (modelId && !busy) { $('output-message').textContent = 'Options changed · convert to apply'; status('Options changed. Select Convert to update the reconstructed model.'); }
+    });
+    document.querySelectorAll('.reset-view').forEach(button => button.addEventListener('click', fitViews));
+    $('download').addEventListener('click', () => {
+      const open = $('download-menu').hidden; $('download-menu').hidden = !open; $('download').setAttribute('aria-expanded', String(open));
+      if (open) $('download-menu').querySelector('button').focus();
+    });
+    for (const button of document.querySelectorAll('[data-format]')) button.addEventListener('click', () => {
+      download(button.dataset.format).catch(error => status(`Download failed: ${error.message}`, 'error'));
+    });
+    document.addEventListener('click', event => { if (!event.target.closest('.download')) { $('download-menu').hidden = true; $('download').setAttribute('aria-expanded', 'false'); } });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') { $('download-menu').hidden = true; $('download').setAttribute('aria-expanded', 'false'); } });
+    // Prevent accidental navigation when dropping a file outside the input pane.
+    window.addEventListener('dragover', event => event.preventDefault());
+    window.addEventListener('drop', event => event.preventDefault());
+    let dragDepth = 0;
+    const inputPanel = $('input-view').closest('.panel');
+    inputPanel.addEventListener('dragenter', event => { event.preventDefault(); if (++dragDepth === 1) $('input-view').classList.add('dragging'); });
+    inputPanel.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('input-view').classList.remove('dragging'); } });
+    inputPanel.addEventListener('dragover', event => { event.preventDefault(); event.dataTransfer.dropEffect = busy ? 'none' : 'copy'; });
+    inputPanel.addEventListener('drop', event => {
+      event.preventDefault(); dragDepth = 0; $('input-view').classList.remove('dragging');
+      if (event.dataTransfer.files.length !== 1) { status('Drop exactly one STL or 3MF file.', 'error'); return; }
+      loadFile(event.dataTransfer.files[0]);
+    });
+    window.addEventListener('pagehide', () => { worker?.terminate(); if (workerUrl) URL.revokeObjectURL(workerUrl); });
+    try {
+      createView('input-view'); createView('output-view'); resizeViews(); bindInspection();
+      await loadFile(sampleCubeFile());
+      if (location.protocol === 'file:') status('Serve this app over HTTP or HTTPS to enable modules and WASM loading.', 'error');
+    } catch (error) { status(`The 3D viewer could not start: ${error.message}. Check that WebGL is enabled.`, 'error'); }
+  </script>
+</body>
+</html>

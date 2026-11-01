@@ -28,5 +28,10 @@ scripts and manifests in this repository identify the dependency sources and
 configuration needed to rebuild the distributed modules. Packaging copies
 vcpkg's installed dependency copyright files into `dist/licenses/`.
 
-Three.js (MIT, https://github.com/mrdoob/three.js) is a development dependency
-used for GLB loading and picking tests; it is not included in the deployment archive.
+Three.js (MIT, https://github.com/mrdoob/three.js) is used for GLB loading and
+picking tests. The browser demo loads Three.js 0.186.1 and its addons from
+jsDelivr, including fflate 0.8.2 (MIT, https://github.com/101arrowz/fflate) for
+reading 3MF ZIP archives. Their licenses are available at
+https://cdn.jsdelivr.net/npm/three@0.186.1/LICENSE and
+https://cdn.jsdelivr.net/npm/fflate@0.8.2/LICENSE. These JavaScript demo
+dependencies are not included in the WASM deployment archive.

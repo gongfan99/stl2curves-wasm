@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="450 35 620 620" role="img" aria-labelledby="title desc">
+  <title id="title">L2CAD symbol</title>
+  <desc id="desc">An isometric CAD cube formed by the characters L and 2.</desc>
+  <defs>
+    <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3d7898"/>
+      <stop offset=".52" stop-color="#315f7d"/>
+      <stop offset="1" stop-color="#29485f"/>
+    </linearGradient>
+    <linearGradient id="teal" x1="0" y1="0" x2=".8" y2="1">
+      <stop offset="0" stop-color="#4a9c91"/>
+      <stop offset="1" stop-color="#367b79"/>
+    </linearGradient>
+  </defs>
+
+  <g fill="none" stroke="#526879" stroke-linecap="square" stroke-linejoin="round">
+    <path d="M496 198 745 74 994 200 744 330Z" stroke-width="7"/>
+    <ellipse cx="745" cy="200" rx="96" ry="51" stroke-width="7"/>
+    <path d="M745 76V330M496 200H995" stroke="#64798a" stroke-width="3" stroke-dasharray="18 12"/>
+    <path d="M725 200h40M745 180v40" stroke="#9babb6" stroke-width="3"/>
+  </g>
+
+  <path d="M492 218 570 260V455L735 549V634L492 500Z" fill="url(#blue)"/>
+  <path d="M755 430V386q0-37 35-55l143-80q31-17 52-3 20 14 20 48v40q0 49-48 86L849 508q-20 15-20 31v11l185-96v57L755 645v-91q0-45 43-80l113-91q23-18 23-36v-13q0-13-8-15-8-2-21 5l-56 31q-20 11-20 39Z" fill="url(#teal)"/>
+</svg>

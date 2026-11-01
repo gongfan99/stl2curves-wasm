@@ -60,6 +60,40 @@ sh scripts/build_wasm.sh single_thread
 Builds use `build_wasm_threaded/` and `build_wasm_single_thread/`, with separate
 vcpkg installations, and package into `dist/`. Generated outputs are ignored.
 
+## Browser demo
+
+The single-page [app/index.html](app/index.html) provides synchronized input and
+reconstructed model viewers, drag-and-drop STL/3MF loading, conversion options,
+and GLB and STEP downloads. Fuse defaults to **off** in this demo.
+Conversion runs in an application Worker. All runtime assets are local.
+
+In the right viewer, hover over faces and edges to highlight them. Edge tooltips
+show line length, circle radius and partial-arc angle, or the other curve's type.
+Lengths use two decimal places in millimeters. Select two faces, edges, or vertices
+and measure their exact minimum distance in millimeters, with axis deltas and a
+line between the closest points. Measurement is always active and all three types
+are selectable, prioritizing vertices, then edges, then faces. Picking tolerances
+are 0.8% of model size for vertices and 0.6% for edges, independent of zoom.
+A third selection starts a new measurement; Clear or Escape resets it.
+Dragging still orbits the synchronized viewers instead of selecting geometry.
+
+The app loads the conversion library from
+`https://static.fgong.dev/stl2curves-wasm/v0.1.0/`, including its JavaScript and
+WASM assets. Three.js and its addons load from jsDelivr, pinned to version
+`0.186.1`. Serve `app/` with a static HTTP server. Opening the HTML directly with `file://` does not
+support module and WASM loading. For local development from the repository root,
+the existing test server can serve both browser isolation modes:
+
+```sh
+node --input-type=module -e "import { createServer } from './wasm/browser_server.mjs'; createServer().listen(8080, '127.0.0.1')"
+```
+
+Open `http://127.0.0.1:8080/ordinary/app/index.html` for the single-thread build,
+or `http://127.0.0.1:8080/isolated/app/index.html` for the threaded build. For
+production, configure the isolation headers described below to enable threads.
+Run `npm run test:app` to exercise the page against the hosted conversion library
+and Three.js from jsDelivr. This requires internet access.
+
 ## Browser loading
 
 `loader.mjs` fetches JavaScript and WASM, imports JavaScript through a blob URL,
