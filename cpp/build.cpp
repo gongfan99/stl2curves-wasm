@@ -1281,8 +1281,8 @@ TopoDS_Shape unite(const std::vector<TopoDS_Shape> &shapes, Context &ctx) {
         throw std::runtime_error("No solids to fuse");
     auto shape = bodies.front();
     for (std::size_t i = 1; i < bodies.size(); ++i) {
-        // OCCT's persistent default pool would compete with the bounded fitting
-        // pool for Emscripten pthread slots on the next conversion.
+        // Keep boolean fusion sequential; fitting and meshing use the shared
+        // OCCT pool for parallel work.
         BRepAlgoAPI_Fuse fuse(shape, bodies[i]);
         fuse.SetRunParallel(false);
         fuse.SetFuzzyValue(ctx.options.tolerance);

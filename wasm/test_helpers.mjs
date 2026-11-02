@@ -141,12 +141,25 @@ export function exercise(module, expectedThreaded) {
     assert(projectStep.diagnostics.valid && Math.abs(projectStep.diagnostics.volume-25.4**3)<1e-6, '3MF units/STEP validation');
     const failed=convert([{name:'open.stl',data:cubeStl(true)}],{repair:false,curves:false});
     assert(failed.models.length===0 && failed.errors.length===1 && failed.errors[0].diagnostics?.openEdges===4,'Mesh failure diagnostics');
-    const parallel=convert([{name:'cylinders.stl',data:cylindersStl()}],{fuse:false});
+    const cylinderBytes=cylindersStl();
+    let parallel=convert([{name:'cylinders.stl',data:cylinderBytes}],{fuse:false});
     assert(parallel.errors.length===0 && parallel.models.length===1,JSON.stringify(parallel.errors));
     const diagnostics=parallel.models[0].diagnostics;
     assert(diagnostics.valid && diagnostics.solids===12,'Disconnected bodies lost');
     if(expectedThreaded && info.workers>1) assert(diagnostics.parallelTasks>0,'No pthread fitting tasks');
     else assert(diagnostics.parallelTasks===0,'Sequential configuration ran background tasks');
+    // GLB meshing retains OCCT's pthreads. Later fitting must reuse that pool.
+    for(let pass=0;pass<3;++pass){
+      const glb=module.exportGltf(parallel.models[0].modelId);
+      assert(glb.data.byteLength>20,'Repeated cylinder GLB export failed');
+      assert(module.releaseModel(parallel.models[0].modelId),'Cylinder release failed');
+      parallel=convert([{name:'cylinders.stl',data:cylinderBytes}],{fuse:false});
+      const repeated=parallel.models[0]?.diagnostics;
+      assert(parallel.errors.length===0 && parallel.models.length===1 && repeated.valid && repeated.solids===12,
+        'Fitting after GLB meshing failed: '+JSON.stringify(parallel.errors));
+      if(expectedThreaded && info.workers>1) assert(repeated.parallelTasks>0,'Repeated fitting stopped using background workers');
+    }
+    module.releaseModel(parallel.models[0].modelId);
     rejected=false;
     try { module.convert([],{tolerance:0}); } catch { rejected=true; }
     assert(rejected,'Invalid options accepted');

@@ -1,5 +1,6 @@
 #include "internal.hpp"
 #include <Eigen/Cholesky>
+#include <OSD_ThreadPool.hxx>
 #include <atomic>
 #include <cstdlib>
 #include <exception>
@@ -56,20 +57,15 @@ unsigned parallel_for(std::size_t count, const std::function<void(std::size_t)> 
             stop = true;
         }
     };
-    std::vector<std::thread> threads;
-    // Joining on creation failure prevents std::terminate during stack unwinding.
-    try {
-        for (unsigned i = 1; i < n; ++i)
-            threads.emplace_back([&] { run(true); });
-    } catch (...) {
-        stop = true;
-        for (auto &t : threads)
-            t.join();
-        throw;
-    }
-    run(false);
-    for (auto &t : threads)
-        t.join();
+    // Reuse the pool used by OCCT meshing instead of allocating a second set
+    // of pthreads. Launcher includes the caller and waits for all jobs to finish.
+    OSD_ThreadPool::Launcher launcher(*OSD_ThreadPool::DefaultPool(), int(n));
+    const int caller_index = launcher.UpperThreadIndex();
+    // Only the bounded runner count crosses OCCT's int-based range API; the
+    // atomic queue above retains size_t indexing for the actual fitting tasks.
+    launcher.Perform(0, int(n), [&](int thread_index, int) {
+        run(thread_index != caller_index);
+    });
     if (error)
         std::rethrow_exception(error);
     return background.load();

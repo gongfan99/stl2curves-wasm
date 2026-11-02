@@ -106,7 +106,8 @@ Initialization errors are reported instead of silently selecting another build.
 Run conversion in an **application Worker**. Conversion is synchronous after
 module initialization, including in the single-thread variant. A threaded module
 prewarms `navigator.hardwareConcurrency` pthreads and schedules at most eight
-fitting tasks concurrently, including the calling thread.
+fitting tasks concurrently, including the calling thread. Fitting and OCCT meshing
+share OCCT's thread pool, so repeated conversions reuse the same pthread workers.
 
 ```js
 // Application Worker; adjust the loader URL to your deployed asset location.

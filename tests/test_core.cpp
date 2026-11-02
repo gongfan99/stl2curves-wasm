@@ -4,6 +4,7 @@
 #include <Eigen/Geometry>
 #include <GProp_GProps.hxx>
 #include <Geom_SphericalSurface.hxx>
+#include <OSD_ThreadPool.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <STEPControl_Reader.hxx>
 #include <atomic>
@@ -172,6 +173,25 @@ void test_numeric() {
         caught = true;
     }
     check(caught, "worker exception propagation");
+    sum = 0;
+    parallel_for(100, [&](std::size_t i) { sum += unsigned(i); });
+    check(sum == 4950, "pool reusable after worker exception");
+#if STL2CURVES_THREADS
+    if (worker_count() > 1) {
+        auto pool = OSD_ThreadPool::DefaultPool();
+        check(!pool->IsInUse(), "fitting must release its OCCT pool reservation");
+        {
+            // Reserve every OCCT worker without starting jobs. Fitting must
+            // use its caller, rather than allocate a second set of threads.
+            OSD_ThreadPool::Launcher reservation(*pool, pool->NbThreads());
+            sum = 0;
+            const auto background = parallel_for(100, [&](std::size_t i) { sum += unsigned(i); });
+            check(sum == 4950 && background == 0,
+                  "busy shared pool must fall back to the calling thread");
+        }
+        check(!pool->IsInUse(), "shared pool reservation leaked");
+    }
+#endif
 }
 void test_projection() {
     Vec normal = Vec(1, 2, 3).normalized(), e = normal.unitOrthogonal(), f = normal.cross(e),
