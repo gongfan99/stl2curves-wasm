@@ -35,10 +35,10 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .cache/vcpkg-binaries
-          key: vcpkg-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.variant }}-em${{ env.EM_VERSION }}-${{ hashFiles('vcpkg*.json', 'vcpkg-triplets/**', 'vcpkg-overlays/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ matrix.variant }}-em${{ env.EM_VERSION }}-${{ hashFiles('vcpkg*.json', 'vcpkg-triplets/**', 'vcpkg-overlays/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            vcpkg-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.variant }}-em${{ env.EM_VERSION }}-${{ hashFiles('vcpkg*.json', 'vcpkg-triplets/**', 'vcpkg-overlays/**') }}-
-            vcpkg-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.variant }}-em${{ env.EM_VERSION }}-
+            vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ matrix.variant }}-em${{ env.EM_VERSION }}-${{ hashFiles('vcpkg*.json', 'vcpkg-triplets/**', 'vcpkg-overlays/**') }}-
+            vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ matrix.variant }}-em${{ env.EM_VERSION }}-
       - name: Record restored binary archives
         env:
           VARIANT: ${{ matrix.variant }}

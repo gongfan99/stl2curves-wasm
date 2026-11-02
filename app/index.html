@@ -246,7 +246,10 @@
     // inline Worker is a module so the loader can select either WASM variant.
     function ensureWorker() {
       if (worker) return;
-      const loaderUrl = 'https://static.fgong.dev/stl2curves-wasm/v0.1.0/loader.mjs';
+      const isLocalhost = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+      const loaderUrl = isLocalhost
+        ? new URL('./lib/stl2curves-wasm/v0.1.0/loader.mjs', document.baseURI).href
+        : 'https://static.fgong.dev/stl2curves-wasm/v0.1.0/loader.mjs';
       const code = `
         let instance;
         async function module() {

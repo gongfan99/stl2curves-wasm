@@ -11,6 +11,7 @@ vcpkg_from_github(
         0003-image-remove-freeimage-msvc-autolink.patch
         0004-cmake-add-additional-path-extraction-for-OpenCASCADE.patch
         0005-drop-bin-letter.patch
+        0006-cmake-disable-tkmesh-lto.patch
 )
 
 if (VCPKG_LIBRARY_LINKAGE STREQUAL "dynamic")
