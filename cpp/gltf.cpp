@@ -15,6 +15,9 @@
 #include <NCollection_List.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <cstring>
 #include <iomanip>
 #include <limits>

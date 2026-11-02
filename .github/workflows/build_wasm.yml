@@ -30,19 +30,48 @@ jobs:
           emsdk/emsdk activate "$EM_VERSION"
       - name: Export preinstalled vcpkg
         run: echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
-      - uses: actions/cache@v6
+      - name: Cache vcpkg binaries
+        id: cache-vcpkg
+        uses: actions/cache@v6
         with:
-          path: ${{ github.workspace }}/.cache/vcpkg-binaries
-          key: vcpkg-${{ runner.os }}-${{ matrix.variant }}-${{ env.EM_VERSION }}-${{ hashFiles('vcpkg*.json', 'vcpkg-triplets/**', 'vcpkg-overlays/**') }}
+          path: .cache/vcpkg-binaries
+          key: vcpkg-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.variant }}-em${{ env.EM_VERSION }}-${{ hashFiles('vcpkg*.json', 'vcpkg-triplets/**', 'vcpkg-overlays/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vcpkg-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.variant }}-em${{ env.EM_VERSION }}-${{ hashFiles('vcpkg*.json', 'vcpkg-triplets/**', 'vcpkg-overlays/**') }}-
+            vcpkg-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.variant }}-em${{ env.EM_VERSION }}-
+      - name: Record restored binary archives
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          mkdir -p .cache/vcpkg-binaries ".cache/vcpkg-diagnostics/$VARIANT"
+          find .cache/vcpkg-binaries -type f -name '*.zip' -printf '%P\n' | sort > ".cache/vcpkg-diagnostics/$VARIANT/restored-archives.txt"
       - name: Build and package variant
         env:
           VARIANT: ${{ matrix.variant }}
           PACKAGE_VARIANT_ONLY: "ON"
         run: |
+          set -o pipefail
           source emsdk/emsdk_env.sh
           mkdir -p "$GITHUB_WORKSPACE/.cache/vcpkg-binaries"
           export VCPKG_BINARY_SOURCES="clear;files,$GITHUB_WORKSPACE/.cache/vcpkg-binaries,readwrite"
-          sh scripts/build_wasm.sh "$VARIANT"
+          sh scripts/build_wasm.sh "$VARIANT" 2>&1 | tee ".cache/vcpkg-diagnostics/$VARIANT/build.log"
+      - name: Collect vcpkg ABI diagnostics
+        if: always()
+        env:
+          VARIANT: ${{ matrix.variant }}
+          VCPKG_CACHE_HIT: ${{ steps.cache-vcpkg.outputs.cache-hit }}
+        run: |
+          if [ -f emsdk/emsdk_env.sh ]; then source emsdk/emsdk_env.sh || true; fi
+          sh scripts/collect_vcpkg_diagnostics.sh "$VARIANT"
+      - name: Upload vcpkg ABI diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vcpkg-diagnostics-${{ matrix.variant }}-${{ github.run_attempt }}
+          path: .cache/vcpkg-diagnostics/${{ matrix.variant }}/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 30
       - uses: actions/upload-artifact@v7
         with:
           name: stl2curves-part-${{ matrix.variant }}

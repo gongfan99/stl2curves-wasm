@@ -1,4 +1,8 @@
 #pragma once
+#ifndef STL2CURVES_THREADS
+// CMake supplies the build mode; standalone tooling defaults to single-threaded.
+#define STL2CURVES_THREADS 0
+#endif
 #include "occt_collections.hpp"
 #include <Eigen/Core>
 #include <Geom_Surface.hxx>
