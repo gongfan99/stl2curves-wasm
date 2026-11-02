@@ -30,9 +30,9 @@ export interface ShapeRef { modelId: number; brepgraph_id?: GraphId; usagePath?:
 export interface ModelInfo { modelId: number; name: string; root: ShapeRef; diagnostics: Diagnostics }
 export interface ConversionError { input: string; object: string; code: string; message: string; diagnostics?: Diagnostics }
 export interface GltfExportOptions {
-  /** Maximum linear deflection in model millimeters; default 0.1. */
+  /** Maximum linear deflection in model millimeters; default 0.04. */
   linearDeflection?: number;
-  /** Angular deflection in radians; default 0.5. */
+  /** Angular deflection in radians; default 0.4188790204786391 (24 degrees). */
   angularDeflection?: number;
   faces?: boolean; edges?: boolean; vertices?: boolean;
 }

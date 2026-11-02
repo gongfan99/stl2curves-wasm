@@ -217,8 +217,12 @@ try {
 ## Selectable GLB and exact queries
 
 `exportGltf(modelId, options?)` produces binary glTF (`.glb`) without textures or
-compression. The defaults are `linearDeflection: 0.1` mm,
-`angularDeflection: 0.5` radians, and `faces`, `edges`, `vertices` all `true`.
+compression. The defaults are `linearDeflection: 0.04` mm,
+`angularDeflection: 0.4188790204786391` radians (24 degrees), and `faces`, `edges`, `vertices` all `true`.
+The exporter meshes the retained whole shape directly, then extracts face triangles
+and edge polygons from that shared mesh. Subsequent exports may reuse existing
+triangulations, including a finer mesh from an earlier export. Standalone edges without mesh polygons
+fall back to curve sampling. Parallel meshing is enabled in threaded builds.
 Faces are meshes, edges are line segments, and vertices are point objects.
 Compound/solid/shell groups are preserved. Degenerate geometry retains selectable
 metadata-only nodes and produces warnings; ordinary face meshing failures throw.

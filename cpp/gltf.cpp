@@ -1,14 +1,19 @@
 #include "model_internal.hpp"
 #include "occt_error.hpp"
 #include <BRepAdaptor_Curve.hxx>
-#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Tool.hxx>
 #include <GCPnts_TangentialDeflection.hxx>
 #include <IMeshTools_Parameters.hxx>
+#include <Poly_Polygon3D.hxx>
+#include <Poly_PolygonOnTriangulation.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Precision.hxx>
+#include <TopExp.hxx>
+#include <NCollection_IndexedDataMap.hxx>
+#include <NCollection_List.hxx>
+#include <TopTools_ShapeMapHasher.hxx>
 #include <TopoDS.hxx>
 #include <cstring>
 #include <iomanip>
@@ -123,6 +128,31 @@ GltfFile Model::export_gltf(const GltfExportOptions &options) const {
         throw std::invalid_argument("Invalid GLB meshing options");
     std::lock_guard<std::recursive_mutex> guard(impl_->mutex);
     try {
+        // Mesh the retained shape once so adjacent faces share boundary discretization.
+        // OCCT can reuse these triangulations on subsequent exports.
+        const auto &shape = impl_->shape;
+        IMeshTools_Parameters parameters;
+        parameters.MeshAlgo = static_cast<IMeshTools_MeshAlgoType>(-1);
+        parameters.Deflection = options.linear_deflection;
+        parameters.Angle = options.angular_deflection;
+        parameters.AngleInterior = -1.0;
+        parameters.DeflectionInterior = -1.0;
+        parameters.MinSize = -1.0;
+        parameters.InParallel = STL2CURVES_THREADS != 0;
+        parameters.Relative = false;
+        parameters.InternalVerticesMode = true;
+        parameters.ControlSurfaceDeflection = true;
+        parameters.EnableControlSurfaceDeflectionAllSurfaces = false;
+        parameters.CleanModel = true;
+        parameters.AdjustMinSize = false;
+        parameters.ForceFaceDeflection = false;
+        parameters.AllowQualityDecrease = false;
+        BRepMesh_IncrementalMesh mesh(shape, parameters);
+        if (!mesh.IsDone())
+            throw std::runtime_error("Shape tessellation failed");
+        NCollection_IndexedDataMap<TopoDS_Shape, NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher>
+            edge_faces;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
         Writer writer;
         auto &model = writer.model;
         GltfFile result{impl_->name + ".glb", {}, {}};
@@ -205,15 +235,7 @@ GltfFile Model::export_gltf(const GltfExportOptions &options) const {
             std::vector<float> positions, normals;
             std::vector<std::uint32_t> indices;
             if (kind == 2) {
-                BRepBuilderAPI_Copy copy(entry.shape, true, false);
-                auto face = TopoDS::Face(copy.Shape());
-                IMeshTools_Parameters parameters;
-                parameters.Deflection = options.linear_deflection;
-                parameters.Angle = options.angular_deflection;
-                parameters.InParallel = false;
-                BRepMesh_IncrementalMesh mesh(face, parameters);
-                if (!mesh.IsDone())
-                    throw std::runtime_error("Face tessellation failed");
+                auto face = TopoDS::Face(entry.shape);
                 TopLoc_Location location;
                 auto triangulation = BRep_Tool::Triangulation(face, location);
                 if (triangulation.IsNull() || !triangulation->NbTriangles())
@@ -243,18 +265,44 @@ GltfFile Model::export_gltf(const GltfExportOptions &options) const {
             } else if (kind == 4) {
                 auto edge = TopoDS::Edge(entry.shape);
                 if (!BRep_Tool::Degenerated(edge)) {
-                    BRepAdaptor_Curve curve(edge);
-                    if (std::isfinite(curve.FirstParameter()) &&
-                        std::isfinite(curve.LastParameter()) &&
-                        !Precision::IsInfinite(curve.FirstParameter()) &&
-                        !Precision::IsInfinite(curve.LastParameter())) {
-                        GCPnts_TangentialDeflection points(curve, options.angular_deflection,
-                                                           options.linear_deflection);
-                        for (int p = 1; p <= points.NbPoints(); ++p)
-                            point(positions, points.Value(p));
-                        for (std::size_t p = 1; p < positions.size() / 3; ++p)
-                            indices.insert(indices.end(), {std::uint32_t(p - 1), std::uint32_t(p)});
+                    if (edge_faces.Contains(edge)) {
+                        for (const auto &owner : edge_faces.FindFromKey(edge)) {
+                            TopLoc_Location location;
+                            auto tri = BRep_Tool::Triangulation(TopoDS::Face(owner), location);
+                            if (tri.IsNull())
+                                continue;
+                            auto polygon = BRep_Tool::PolygonOnTriangulation(edge, tri, location);
+                            if (polygon.IsNull())
+                                continue;
+                            for (int n = polygon->Nodes().Lower(); n <= polygon->Nodes().Upper(); ++n)
+                                point(positions, tri->Node(polygon->Nodes().Value(n))
+                                                     .Transformed(location.Transformation()));
+                            break;
+                        }
                     }
+                    if (positions.empty()) {
+                        TopLoc_Location location;
+                        auto polygon = BRep_Tool::Polygon3D(edge, location);
+                        if (!polygon.IsNull())
+                            for (int n = polygon->Nodes().Lower(); n <= polygon->Nodes().Upper(); ++n)
+                                point(positions, polygon->Nodes().Value(n)
+                                                     .Transformed(location.Transformation()));
+                    }
+                    // OCCT may leave free edges without polygons; keep them drawable.
+                    if (positions.empty()) {
+                        BRepAdaptor_Curve curve(edge);
+                        if (std::isfinite(curve.FirstParameter()) &&
+                            std::isfinite(curve.LastParameter()) &&
+                            !Precision::IsInfinite(curve.FirstParameter()) &&
+                            !Precision::IsInfinite(curve.LastParameter())) {
+                            GCPnts_TangentialDeflection points(curve, options.angular_deflection,
+                                                               options.linear_deflection);
+                            for (int p = 1; p <= points.NbPoints(); ++p)
+                                point(positions, points.Value(p));
+                        }
+                    }
+                    for (std::size_t p = 1; p < positions.size() / 3; ++p)
+                        indices.insert(indices.end(), {std::uint32_t(p - 1), std::uint32_t(p)});
                 }
                 if (indices.empty())
                     result.warnings.push_back("Edge " + std::to_string(ref.brepgraph_id->index) +

@@ -71,7 +71,7 @@ struct ShapeRef {
     std::optional<std::vector<UsagePathStep>> usage_path;
 };
 struct GltfExportOptions {
-    double linear_deflection = 0.1, angular_deflection = 0.5;
+    double linear_deflection = 0.04, angular_deflection = 0.4188790204786391; // 24 degrees
     bool faces = true, edges = true, vertices = true;
 };
 struct GltfFile {

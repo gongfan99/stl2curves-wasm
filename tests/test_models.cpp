@@ -2,8 +2,13 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+#include <array>
 #include <Geom_SphericalSurface.hxx>
 #include <Geom_ToroidalSurface.hxx>
 #include <TopoDS_Compound.hxx>
@@ -44,6 +49,36 @@ Json json(const GltfFile &file) {
           "GLB header");
     check(u32(file.data, 16) == 0x4e4f534a, "GLB JSON chunk");
     return Json::parse(file.data.begin() + 20, file.data.begin() + 20 + u32(file.data, 12));
+}
+std::vector<std::array<float, 3>> positions(const GltfFile &file, const Json &glb,
+                                            const Json &primitive) {
+    const auto &accessor = glb["accessors"][primitive["attributes"]["POSITION"].get<int>()];
+    const auto &view = glb["bufferViews"][accessor["bufferView"].get<int>()];
+    const std::size_t offset = 20 + u32(file.data, 12) + 8 +
+                              view.value("byteOffset", std::size_t(0)) +
+                              accessor.value("byteOffset", std::size_t(0));
+    std::vector<std::array<float, 3>> result(accessor["count"].get<std::size_t>());
+    check(offset + result.size() * sizeof(result[0]) <= file.data.size(), "position buffer bounds");
+    std::memcpy(result.data(), file.data.data() + offset, result.size() * sizeof(result[0]));
+    return result;
+}
+void shared_boundaries(const GltfFile &file) {
+    const auto glb = json(file);
+    std::set<std::array<float, 3>> face_nodes;
+    for (const auto &mesh : glb["meshes"])
+        for (const auto &primitive : mesh["primitives"])
+            if (primitive["mode"] == 4)
+                for (const auto &p : positions(file, glb, primitive))
+                    face_nodes.insert(p);
+    std::size_t edge_nodes = 0;
+    for (const auto &mesh : glb["meshes"])
+        for (const auto &primitive : mesh["primitives"])
+            if (primitive["mode"] == 1)
+                for (const auto &p : positions(file, glb, primitive)) {
+                    check(face_nodes.count(p) != 0, "edge point must coincide with a face mesh node");
+                    ++edge_nodes;
+                }
+    check(edge_nodes > 0, "boundary fixture must export edge nodes");
 }
 ShapeRef selection_ref(const Json &value) {
     ShapeRef out;
@@ -201,6 +236,9 @@ void curves() {
         retain(BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(gp_Pnt(2, 3, 4), gp_Dir(0, 0, 1)), 2), 0,
                                        std::acos(-1.) / 2)
                    .Shape());
+    auto circle_file = circle->export_gltf();
+    check(circle_file.warnings.empty() && !json(circle_file)["meshes"].empty(),
+          "standalone curved edge remains drawable");
     auto properties = circle->get_shape_properties(circle->root());
     check(std::abs(property(properties, "radius") - 2) < 1e-10 &&
               std::abs(property(properties, "length") - std::acos(-1.)) < 1e-9 &&
@@ -218,9 +256,23 @@ void curves() {
         retain(BRepBuilderAPI_MakeEdge(gp_Lin(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0))).Shape());
     check(unbounded->get_shape_properties(unbounded->root()).size() == 2,
           "unbounded edge metadata");
+    auto cylinder = retain(BRepPrimAPI_MakeCylinder(2, 3).Shape());
+    shared_boundaries(cylinder->export_gltf());
     auto sphere = retain(BRepPrimAPI_MakeSphere(2).Shape());
     auto before = sphere->root();
     auto sphere_file = sphere->export_gltf();
+    shared_boundaries(sphere_file);
+    const auto &original = ModelAccess::get(*sphere).shape;
+    for (TopExp_Explorer it(original, TopAbs_FACE); it.More(); it.Next()) {
+        TopLoc_Location location;
+        check(!BRep_Tool::Triangulation(TopoDS::Face(it.Current()), location).IsNull(),
+              "GLB export must mesh the retained shape");
+    }
+    GltfExportOptions fine;
+    fine.linear_deflection = .005;
+    fine.angular_deflection = .1;
+    shared_boundaries(sphere->export_gltf(fine));
+    shared_boundaries(sphere->export_gltf());
     check(!sphere_file.warnings.empty(), "degenerate edges retain metadata and produce warnings");
     auto glb = json(sphere_file);
     check(!glb["meshes"].empty(), "sphere tessellation");
