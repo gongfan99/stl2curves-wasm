@@ -316,15 +316,15 @@ TopoDS_Face natural_patch(const Mesh &mesh, const Patch &patch, double tolerance
             poles.insert(id);
     }
     auto unwrap = [&](bool u, double period) {
+        auto normalized = [period](double t) {
+            t = std::fmod(t, period);
+            return t < 0 ? t + period : t;
+        };
         std::vector<double> values;
         for (const auto &item : uv) {
             if (u && poles.count(item.first))
                 continue;
-            double t = u ? item.second.X() : item.second.Y();
-            t = std::fmod(t, period);
-            if (t < 0)
-                t += period;
-            values.push_back(t);
+            values.push_back(normalized(u ? item.second.X() : item.second.Y()));
         }
         if (values.empty())
             return;
@@ -334,12 +334,15 @@ TopoDS_Face natural_patch(const Mesh &mesh, const Patch &patch, double tolerance
             double next = values[(i + 1) % values.size()] + (i + 1 == values.size() ? period : 0);
             if (next - values[i] > gap) {
                 gap = next - values[i];
-                cut = std::fmod(next, period);
+                // Keep the actual sample: adding and removing a period can
+                // round the cut above its endpoint and wrap it a full turn.
+                cut = values[(i + 1) % values.size()];
             }
         }
         for (auto &item : uv) {
-            double t = u ? item.second.X() : item.second.Y();
-            t -= std::floor((t - cut) / period) * period;
+            double t = normalized(u ? item.second.X() : item.second.Y());
+            if (t < cut)
+                t += period;
             if (u)
                 item.second.SetX(t);
             else
@@ -573,6 +576,12 @@ std::vector<TopoDS_Face> trimmed_patch(const Mesh &mesh, const Patch &patch, dou
                                                      reverse ? a.shape : b.shape, first, last);
                         if (make.IsDone()) {
                             edge = make.Edge();
+                            // The pcurve supplies the chart placement, not a
+                            // replacement for the exact 3D boundary. Rebuilding
+                            // it with BuildCurve3d can turn circles into splines.
+                            builder.UpdateEdge(edge, curve,
+                                               std::max(error, BRep_Tool::Tolerance(exact->second)));
+                            builder.Range(edge, first, last);
                             if (reverse)
                                 edge.Reverse();
                         }
