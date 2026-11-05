@@ -42,6 +42,8 @@ export interface ConversionResult {
   errors: ConversionError[];
 }
 export interface Stl2curvesModule {
+  /** Import exact STEP topology, normalized to model millimeters. */
+  importStep(input: InputFile): ModelInfo;
   convert(inputs: InputFile[], options?: ConversionOptions): ConversionResult;
   exportStep(modelId: number): OutputFile;
   exportGltf(modelId: number, options?: GltfExportOptions): GltfFile;

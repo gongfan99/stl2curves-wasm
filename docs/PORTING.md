@@ -42,11 +42,46 @@ acceptance limits in `tests/regression_cases.json`. Do not weaken these limits
 to obtain a passing suite. Full parity requires validity, volume, face-count,
 and feature-specific regressions to pass, rather than merely producing STEP.
 
-Time limits are cooperative budgets for optional fitting and recovery. They do
-not interrupt an OpenCascade call already executing. Python process termination
+Time limits are cooperative budgets for optional fitting and recovery. The solid
+reconstruction budget starts after analysis, so expensive fitting cannot consume
+the time available to recover valid curved patches. Recovery preserves shared
+boundaries and uses invalid faces and seams to identify which supports to rebuild
+as facets, including defective fitted planes next to otherwise valid curves.
+The boundary builder follows Python `build.py`'s `_plane_face`, `_rejoin`, and
+`_without_collapsed`: probe repairs before modifying shared geometry, join exact
+boundary copies before sewing, and remove short edges collapsed by sewing while
+preserving genuine closed circles. Recovery follows `convert.py`'s `culprits`
+ordering by reverting suspect blends before their analytic neighbors, then
+retrying patches that may have been blamed for a neighbor's failure.
+These budgets do not interrupt an OpenCascade call already executing. Python process termination
 has no direct equivalent for an individual C++ pthread. Applications requiring
 hard cancellation must terminate the outer application Worker and create a new
 module instance; pending results from that Worker are then abandoned.
+
+Freeform fitting follows `freeform.py`'s weighted corner/interior samples and
+accuracy scaling (tuned at 0.02 mm, capped at 0.1 mm). Regions split at 20-degree
+creases and, when necessary, by the area-weighted principal variation of their
+normals into connected pieces. Precise reconstructed pieces are retained; the
+looser accuracy-scaled fit recovers areas those pieces do not explain. Height-field
+trim charts use their affine base coordinates, as `Freeform.uvh()` does, rather
+than moving each chart vertex independently to a nearest surface point.
+
+As in Python `attempt()` and `sewing_cap()`, fitted-patch sewing adapts to measured
+mesh-to-support gaps, capped by 0.2 mm and twice the median mesh edge, with the
+configured tolerance as its lower bound. UV trims, repaired 3D outlines, and bounded
+kernel splitting are tried before retaining triangulated trims on the same support.
+The native kernel-cut fallback is restricted to small supports because an in-process
+OpenCascade call cannot use Python's worker timeout.
+
+Final cleanup follows `_tidy` and `_bad_merges`: merge at 0.001 mm and 0.1 degrees,
+keep seams of invalid merged faces apart, and check volume integration within 0.1%
+before the unchanged corrected-volume and closed-solid checks. Cleanup copies
+topology while preserving shared surface identity; copying geometry independently
+for every face prevents the kernel from merging B-spline faces on one support.
+
+GLB export retries faces omitted by the default body tessellation with a finer,
+area-scaled deflection. This handles tiny valid trims left by reconstruction
+without removing faces or changing the retained model's graph identities.
 
 The new implementation does not reproduce every upstream repair and recovery
 heuristic verbatim. Self-intersecting/nonmanifold meshes can still fail instead

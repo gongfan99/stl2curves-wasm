@@ -103,6 +103,18 @@ export function exercise(module, expectedThreaded) {
     assert(file.diagnostics.valid && file.diagnostics.faces === 6 &&
       Math.abs(file.diagnostics.volume - 1) < 1e-7, 'Invalid STEP cube');
     assert(new TextDecoder().decode(file.data.subarray(0, 100)).includes('ISO-10303-21'), 'Invalid STEP header');
+    const imported = module.importStep({ name: 'cube.STP', data: file.data });
+    owned.push(imported.modelId);
+    assert(imported.name === 'cube' && imported.diagnostics.faces === 6 && imported.diagnostics.valid,
+      'STEP import must retain exact cube topology');
+    const importedGlb = parseGlb(module.exportGltf(imported.modelId).data);
+    const importedEdge = importedGlb.nodes.find(n => n.extras?.brepgraph_id?.kind === 4).extras;
+    assert(module.getShapeProperties(importedEdge).properties.some(p => p.name === 'length' && Math.abs(p.value[0]-1)<1e-8),
+      'Imported STEP exact edge properties');
+    assert(module.getClosestPoints(importedEdge, importedEdge).distance < 1e-8, 'Imported STEP measurements');
+    let importRejected = false;
+    try { module.importStep({ name: 'bad.step', data: new Uint8Array([1,2,3]) }); } catch { importRejected = true; }
+    assert(importRejected, 'Malformed STEP accepted');
     const retainedStep = file.data.slice(), retainedGlb = glb.data.slice();
     const second = parseGlb(module.exportGltf(model.modelId).data);
     assert(JSON.stringify(parsed.nodes) === JSON.stringify(second.nodes), 'Export changed graph identities');

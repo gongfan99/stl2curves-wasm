@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <script src="./coi-serviceworker.js"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090d24">
+  <title>STEP Viewer | A Tool by L2CAD</title>
+  <meta name="description" content="Open STEP files in your browser. Inspect faces and edges and measure exact distances. Your files stay on your device.">
+  <link rel="icon" type="image/svg+xml" href="./l2cad_logo.svg">
+  <link rel="stylesheet" href="./workspace.css">
+  <style>
+    .workspace { grid-template-columns: minmax(0, 1fr); }
+    .viewport { height: clamp(350px, 68vh, 1100px); }
+    .viewport.dragging::after { content: 'Drop one STEP file'; }
+    .viewer-toolbar { justify-content: flex-start; flex-wrap: wrap; min-height: 65px; }
+    .viewer-toolbar .output-message { margin-left: auto; }
+    @media (max-width: 760px) {
+      .viewport { height: max(420px, 60vh); }
+      .viewer-toolbar .output-message { width: 100%; margin-left: 0; }
+      .measurement-readout { max-width: calc(100% - 32px); bottom: 100px; }
+    }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/" } }
+  </script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <a class="brand" href="https://l2cad.com" aria-label="L2CAD home">
+        <img class="brand-icon" src="./l2cad_logo.svg" alt="" width="40" height="40">
+        <div><div class="brand-name">L2CAD</div><div class="brand-caption">STEP workspace</div></div>
+      </a>
+      <div class="runtime"><span class="dot"></span><span id="runtime">Local processing</span></div>
+    </header>
+    <main class="workspace">
+      <section class="panel" aria-labelledby="output-heading">
+        <div class="panel-header"><div class="panel-title"><span class="number green">01</span><h2 id="output-heading">STEP viewer</h2></div><span class="pill" id="output-badge">STEP / STP</span></div>
+        <div class="toolbar viewer-toolbar">
+          <button class="primary" id="open-file" type="button"><svg viewBox="0 0 24 24"><path d="M12 16V4m-4 4 4-4 4 4 M4 15v5h16v-5"/></svg>Open STEP file</button>
+          <input id="file" type="file" accept=".step,.stp" aria-label="Open one STEP file" hidden>
+          <span class="output-message" id="output-message">Hover to inspect · Select two shapes to measure</span>
+        </div>
+        <div class="viewport" id="output-view" aria-label="STEP 3D viewer and file drop area" aria-busy="false">
+          <div class="empty" id="output-empty"><div class="empty-icon"><svg viewBox="0 0 40 40"><path d="m20 4 14 8v16L20 36 6 28V12Z M6 12l14 8 14-8 M20 20v16"/><path d="m13 16 7-4 7 4 M13 24l7 4 7-4"/></svg></div><h3>Explore your CAD model.</h3><p>Drop one STEP file here<br>or use Open STEP file above.</p><small>.step and .stp · Your files stay on this device.</small></div>
+          <canvas class="axis" aria-label="Orientation: X red, Y green, Z blue"></canvas>
+          <div class="view-tools"><button type="button" class="icon-button reset-view" title="Fit model" aria-label="Fit model"><svg viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5 M8 8h8v8H8Z"/></svg></button></div>
+          <div id="shape-tooltip" class="shape-tooltip" role="tooltip" hidden></div>
+          <div id="measurement-readout" class="measurement-readout" role="status" aria-live="polite" hidden><div id="measurement-text"></div><button type="button" id="clear-measurement">Clear measurement</button></div>
+          <div id="distance-label" class="distance-label" hidden></div>
+        </div>
+        <div class="panel-footer"><span class="file-name" id="output-name">No file selected</span><span class="stats" id="output-stats">— faces</span></div>
+      </section>
+    </main>
+    <div class="statusbar" id="status" role="status" aria-live="polite"><span class="dot"></span><span id="status-text">Open a STEP file to get started.</span></div>
+    <details class="diagnostics" id="diagnostics" hidden><summary>Model details</summary><pre id="diagnostics-text"></pre></details>
+    <footer class="footer"><span>Private by design. Viewing and measurement run entirely in your browser.</span><span>Drag to orbit · Scroll to zoom · Right-drag to pan · Escape to clear</span></footer>
+  </div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    const $ = id => document.getElementById(id);
+    const formatNumber = n => new Intl.NumberFormat().format(n);
+    let busy = false;
+    let worker = null, workerUrl = null, requestId = 0, modelId = null;
+    const pending = new Map();
+    let normalization = null;
+    const views = [];
+    const sharedCamera = new THREE.PerspectiveCamera(35, 1, .001, 1000);
+    sharedCamera.position.set(2.3, 1.6, 2.6);
+    const sharedTarget = new THREE.Vector3();
+    const keyLightOffset = new THREE.Vector3(-3, 5, 8).normalize();
+    const inspection = { objects: [], hover: null, selected: [], properties: new Map(),
+      pickObjects: [], pickSources: new Map(), dimension: 1, token: 0, down: null, distanceGroup: null, midpoint: null };
+    const raycaster = new THREE.Raycaster();
+    const inspectionMaterials = {
+      hover: { face: new THREE.MeshBasicMaterial({ color: 0xffb020, side: THREE.DoubleSide }), edge: new THREE.LineBasicMaterial({ color: 0xffb020, depthTest: false }), vertex: new THREE.PointsMaterial({ color: 0xffb020, size: 10, sizeAttenuation: false, depthTest: false }) },
+      selected: { face: new THREE.MeshStandardMaterial({ color: 0x5077ff, emissive: 0x182d67, side: THREE.DoubleSide, roughness: .45 }), edge: new THREE.LineBasicMaterial({ color: 0x7b9aff, depthTest: false }), vertex: new THREE.PointsMaterial({ color: 0x7b9aff, size: 11, sizeAttenuation: false, depthTest: false }) },
+    };
+
+    function status(text, state = 'ready') {
+      $('status-text').textContent = text;
+      $('status').dataset.state = state;
+    }
+    function setBusy(value) {
+      busy = value;
+      $('open-file').disabled = value;
+      $('file').disabled = value;
+      $('output-view').setAttribute('aria-busy', String(value));
+      if (value) { clearHover(); clearMeasurement(); }
+      $('measurement-readout').hidden = value || !modelId;
+    }
+    // Keep synchronous native operations off the rendering/UI thread. This
+    // inline Worker is a module so the loader can select either WASM variant.
+    function ensureWorker() {
+      if (worker) return;
+      const isLocalhost = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+      const loaderUrl = isLocalhost
+        ? new URL('./lib/stl2curves-wasm/v0.1.0/loader.mjs', document.baseURI).href
+        : 'https://static.fgong.dev/stl2curves-wasm/v0.1.0/loader.mjs';
+      const code = `
+        let instance;
+        async function module() {
+          return instance ??= import(${JSON.stringify(loaderUrl)}).then(m => m.default);
+        }
+        self.onmessage = async ({ data: request }) => {
+          const { id, operation, payload } = request;
+          try {
+            const m = await module();
+            let result;
+            if (operation === 'open') {
+              if (typeof m.importStep !== 'function') throw new Error('STEP import is unavailable in this library build. Update the viewer WASM assets.');
+              const model = m.importStep({ name: payload.name, data: new Uint8Array(payload.bytes) });
+              try { result = { model, glb: m.exportGltf(model.modelId), info: m.buildInfo() }; }
+              catch (error) { m.releaseModel(model.modelId); throw error; }
+            } else if (operation === 'properties') result = m.getShapeProperties(payload.shape);
+            else if (operation === 'distance') result = m.getClosestPoints(payload.a, payload.b);
+            else if (operation === 'release') result = m.releaseModel(payload.modelId);
+            else throw new Error('Unknown operation.');
+            const buffer = result?.glb?.data?.buffer ?? result?.data?.buffer;
+            self.postMessage({ id, result }, buffer ? [buffer] : []);
+          } catch (error) { self.postMessage({ id, error: error?.message || String(error) }); }
+        };
+      `;
+      workerUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+      worker = new Worker(workerUrl, { type: 'module', name: 'L2CAD-STEP-viewer' });
+      worker.onmessage = ({ data }) => {
+        const task = pending.get(data.id);
+        if (!task) return;
+        pending.delete(data.id);
+        if (data.error) task.reject(new Error(data.error));
+        else task.resolve(data.result);
+      };
+      worker.onerror = event => {
+        const message = event.message || 'The STEP viewer worker stopped unexpectedly.';
+        for (const task of pending.values()) task.reject(new Error(message));
+        pending.clear();
+        worker.terminate(); worker = null;
+        URL.revokeObjectURL(workerUrl); workerUrl = null;
+        modelId = null;
+        resetInspection();
+        clearView(views[0]);
+        $('output-empty').hidden = false;
+        $('output-name').textContent = 'No file selected';
+        $('output-stats').textContent = '— faces';
+        $('output-message').textContent = 'Open a STEP file to inspect it';
+        $('output-badge').textContent = 'STEP / STP';
+        $('diagnostics').hidden = true;
+        status(`The STEP viewer worker stopped: ${message}`, 'error');
+      };
+    }
+    function request(operation, payload) {
+      ensureWorker();
+      return new Promise((resolve, reject) => {
+        const id = ++requestId;
+        pending.set(id, { resolve, reject });
+        worker.postMessage({ id, operation, payload }, operation === 'open' ? [payload.bytes] : []);
+      });
+    }
+
+    function drawAxis(view) {
+      const canvas = view.axis, dpr = Math.min(devicePixelRatio, 2);
+      canvas.width = canvas.height = 82 * dpr;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      const inverse = view.camera.quaternion.clone().invert();
+      const directions = [
+        { label: 'X', color: '#f28b9d', vector: new THREE.Vector3(1, 0, 0) },
+        { label: 'Y', color: '#70d8b1', vector: new THREE.Vector3(0, 0, -1) },
+        { label: 'Z', color: '#68b6ff', vector: new THREE.Vector3(0, 1, 0) },
+      ].map(a => ({ ...a, vector: a.vector.applyQuaternion(inverse) })).sort((a, b) => a.vector.z - b.vector.z);
+      ctx.fillStyle = '#0a1226aa'; ctx.beginPath(); ctx.arc(41, 41, 37, 0, Math.PI * 2); ctx.fill();
+      for (const axis of directions) {
+        const x = 41 + axis.vector.x * 27, y = 41 - axis.vector.y * 27;
+        ctx.strokeStyle = axis.color; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(41, 41); ctx.lineTo(41 + axis.vector.x * 18, 41 - axis.vector.y * 18); ctx.stroke();
+        ctx.fillStyle = axis.color; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(axis.label, x, y + .5);
+      }
+    }
+    function render() {
+      for (const view of views) {
+        view.key.target.position.copy(sharedTarget);
+        view.key.position.copy(keyLightOffset).applyQuaternion(sharedCamera.quaternion).add(sharedTarget);
+        view.renderer.render(view.scene, view.camera); drawAxis(view);
+      }
+      positionDistanceLabel();
+    }
+    function resizeViews() {
+      if (!views.length) return;
+      const width = Math.max(1, Math.min(...views.map(view => view.element.clientWidth)));
+      const height = Math.max(1, Math.min(...views.map(view => view.element.clientHeight)));
+      sharedCamera.aspect = width / height;
+      sharedCamera.updateProjectionMatrix();
+      for (const view of views) {
+        const w = view.element.clientWidth, h = view.element.clientHeight;
+        view.renderer.setSize(w, h, false);
+        view.renderer.setViewport(Math.floor((w - width) / 2), Math.floor((h - height) / 2), width, height);
+      }
+      render();
+    }
+    function createView(id) {
+      const element = $(id), scene = new THREE.Scene();
+      const camera = sharedCamera;
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.25;
+      renderer.domElement.className = 'render';
+      renderer.domElement.setAttribute('aria-label', 'Rotate STEP model');
+      renderer.domElement.tabIndex = 0;
+      element.prepend(renderer.domElement);
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target = sharedTarget;
+      controls.minDistance = .03; controls.maxDistance = 100;
+      controls.update();
+      scene.add(new THREE.HemisphereLight(0xf7f8f8, 0xf7f8f8, 1.18));
+      const key = new THREE.DirectionalLight(0xfff9ed, 1.8);
+      scene.add(key, key.target);
+      const fill = new THREE.DirectionalLight(0xc8d8e5, .7);
+      fill.position.set(-6, 2, 4); scene.add(fill);
+      const content = new THREE.Group(); scene.add(content);
+      const view = { element, scene, camera, renderer, controls, key, content, axis: element.querySelector('.axis'), model: null };
+      views.push(view);
+      controls.addEventListener('change', render);
+      controls.addEventListener('start', clearHover);
+      new ResizeObserver(resizeViews).observe(element);
+      return view;
+    }
+    function disposeObject(object) {
+      const geometries = new Set(), materials = new Set();
+      object.traverse(child => {
+        if (child.geometry) geometries.add(child.geometry);
+        if (child.material) for (const material of [].concat(child.material)) materials.add(material);
+      });
+      for (const geometry of geometries) geometry.dispose();
+      for (const material of materials) material.dispose();
+    }
+    function clearView(view) {
+      if (view === views[0]) resetInspection();
+      if (view.model) { view.content.remove(view.model); disposeObject(view.model); view.model = null; }
+    }
+    function fitViews() {
+      const box = new THREE.Box3();
+      for (const view of views) if (view.model) box.union(new THREE.Box3().setFromObject(view.content));
+      if (box.isEmpty()) return;
+      const sphere = box.getBoundingSphere(new THREE.Sphere());
+      const aspect = sharedCamera.aspect;
+      const angle = Math.atan(Math.tan(THREE.MathUtils.degToRad(35 / 2)) * Math.min(aspect, 1));
+      const distance = sphere.radius / Math.sin(angle) * 1.18;
+      sharedCamera.position.copy(sphere.center).add(new THREE.Vector3(1, .7, 1.2).normalize().multiplyScalar(distance));
+      sharedTarget.copy(sphere.center);
+      sharedCamera.near = Math.max(distance / 1000, .00001); sharedCamera.far = Math.max(distance * 100, 100);
+      sharedCamera.updateProjectionMatrix(); views[0].controls.update();
+      render();
+    }
+    function normalizeView(view) {
+      view.content.scale.setScalar(normalization.scale);
+      view.content.position.copy(normalization.center).multiplyScalar(-normalization.scale);
+    }
+
+    function selectionKind(object) {
+      const kind = object.userData?.brepgraph_id?.kind;
+      return kind === 2 && object.isMesh ? 'face' : kind === 4 && object.isLine ? 'edge' : kind === 5 && object.isPoints ? 'vertex' : null;
+    }
+    function shapeReference(object) {
+      const { modelId: id, brepgraph_id, usagePath } = object.userData;
+      if (id !== modelId || !brepgraph_id || !Array.isArray(usagePath)) throw new Error('This selection does not belong to the live model.');
+      return { modelId: id, brepgraph_id, usagePath };
+    }
+    const mm = value => `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(Math.abs(value) < 1e-7 ? 0 : value)} mm`;
+    function showMeasurement(text) {
+      $('measurement-text').textContent = text;
+      $('measurement-readout').hidden = busy || !modelId;
+    }
+    function clearHover(redraw = true) {
+      if (inspection.hover) {
+        const { object, material, order } = inspection.hover;
+        object.material = material; object.renderOrder = order;
+        inspection.hover = null;
+      }
+      $('shape-tooltip').hidden = true;
+      if (redraw) render();
+    }
+    function clearMeasurement() {
+      inspection.token++;
+      clearHover(false);
+      for (const item of inspection.selected) { item.object.material = item.material; item.object.renderOrder = item.order; }
+      inspection.selected = [];
+      if (inspection.distanceGroup) {
+        views[0]?.scene.remove(inspection.distanceGroup); disposeObject(inspection.distanceGroup); inspection.distanceGroup = null;
+      }
+      inspection.midpoint = null; $('distance-label').hidden = true;
+      showMeasurement('Select the first face, edge, or vertex.'); render();
+    }
+    function resetInspection() {
+      clearMeasurement();
+      for (const proxy of inspection.pickSources.keys()) proxy.geometry.dispose();
+      inspection.pickObjects = []; inspection.pickSources.clear();
+      inspection.objects = []; inspection.properties.clear(); inspection.down = null;
+      $('measurement-readout').hidden = true;
+      if (views[0]) views[0].renderer.domElement.style.cursor = '';
+    }
+    function attachInspection() {
+      views[0].model.updateWorldMatrix(true, true);
+      views[0].model.traverse(object => { if (selectionKind(object)) inspection.objects.push(object); });
+      const bounds = new THREE.Box3();
+      for (const object of inspection.objects) {
+        object.visible = true;
+        if (selectionKind(object) === 'face') bounds.union(new THREE.Box3().setFromObject(object, true));
+        if (selectionKind(object) === 'face') inspection.pickObjects.push(object);
+        else {
+          // Three.js line/point raycasting divides precision by object.scale,
+          // without including parent scales. Bake the complete GLB + display
+          // transforms into CPU-only picking geometry so thresholds stay in
+          // world units. The display and native selection references stay intact.
+          const geometry = object.geometry.clone().applyMatrix4(object.matrixWorld);
+          const proxy = object.isPoints ? new THREE.Points(geometry, object.material) :
+            object.isLineSegments ? new THREE.LineSegments(geometry, object.material) : new THREE.Line(geometry, object.material);
+          inspection.pickObjects.push(proxy); inspection.pickSources.set(proxy, object);
+        }
+      }
+      if (bounds.isEmpty()) bounds.setFromObject(views[0].model, true);
+      const size = bounds.getSize(new THREE.Vector3());
+      inspection.dimension = Math.max(size.x, size.y, size.z, .001);
+      raycaster.params.Line.threshold = inspection.dimension * .006;
+      raycaster.params.Points.threshold = inspection.dimension * .008;
+      views[0].renderer.domElement.style.cursor = 'crosshair';
+      showMeasurement('Select the first face, edge, or vertex.');
+    }
+    function pickSubshape(event) {
+      const view = views[0];
+      if (busy || !modelId || !view.model) return null;
+      const rect = view.renderer.domElement.getBoundingClientRect(), viewport = view.renderer.getViewport(new THREE.Vector4());
+      const x = (event.clientX - rect.left) * view.element.clientWidth / rect.width - viewport.x;
+      const y = (rect.bottom - event.clientY) * view.element.clientHeight / rect.height - viewport.y;
+      if (x < 0 || y < 0 || x > viewport.z || y > viewport.w) return null;
+      raycaster.setFromCamera(new THREE.Vector2(2 * x / viewport.z - 1, 2 * y / viewport.w - 1), sharedCamera);
+      view.model.updateWorldMatrix(true, true);
+      const hits = raycaster.intersectObjects(inspection.pickObjects, false).map(hit =>
+        inspection.pickSources.has(hit.object) ? { ...hit, object: inspection.pickSources.get(hit.object) } : hit);
+      const priority = { vertex: 3, edge: 2, face: 1 };
+      return hits.sort((a, b) => priority[selectionKind(b.object)] - priority[selectionKind(a.object)] || a.distance - b.distance)[0] || null;
+    }
+    function tooltip(text, event) {
+      const element = $('shape-tooltip'), rect = $('output-view').getBoundingClientRect();
+      element.textContent = text; element.hidden = false;
+      element.style.left = `${Math.max(8, Math.min(event.clientX - rect.left + 14, rect.width - element.offsetWidth - 8))}px`;
+      element.style.top = `${Math.max(8, Math.min(event.clientY - rect.top + 14, rect.height - element.offsetHeight - 8))}px`;
+    }
+    function hoverSubshape(event) {
+      if (event.buttons || busy) { clearHover(); return; }
+      const hit = pickSubshape(event), object = hit?.object;
+      if (!object) { clearHover(); return; }
+      const kind = selectionKind(object);
+      if (inspection.hover?.object !== object) {
+        clearHover(false);
+        inspection.hover = { object, material: object.material, order: object.renderOrder };
+        if (!inspection.selected.some(item => item.object === object)) {
+          object.material = inspectionMaterials.hover[kind]; object.renderOrder = kind === 'face' ? 1 : 20;
+        }
+      }
+      render();
+      if (kind !== 'edge') return;
+      const pointer = { clientX: event.clientX, clientY: event.clientY }, currentModel = modelId;
+      void (async () => {
+        try {
+          if (!inspection.properties.has(object)) inspection.properties.set(object, request('properties', { shape: shapeReference(object) }));
+          const result = await inspection.properties.get(object);
+          if (inspection.hover?.object !== object || modelId !== currentModel || busy) return;
+          const p = Object.fromEntries(result.properties.map(({ name, value }) => [name, value]));
+          const curveName = { 2: 'ellipse', 3: 'hyperbola', 4: 'parabola', 5: 'bezier', 6: 'bspline', 7: 'offset', 8: 'other curve' }[p.curve_type?.[0]];
+          const radius = p.radius?.[0], angle = p.angle_degrees?.[0], length = p.length?.[0];
+          const circular = Number.isFinite(radius) && Number.isFinite(angle);
+          if (!curveName && !circular && !Number.isFinite(length)) return;
+          const lines = [curveName || (circular ? `Radius: ${radius.toFixed(2)} mm` : `Length: ${length.toFixed(2)} mm`)];
+          if (!curveName && circular && Math.abs(angle - 360) > 1e-4) lines.push(`Arc angle: ${angle.toFixed(2)}°`);
+          tooltip(lines.join('\n'), pointer);
+        } catch { /* Hover properties are optional; selection stays usable. */ }
+      })();
+    }
+    function modelPointToScene(point) {
+      return views[0].content.localToWorld(new THREE.Vector3(point[0], point[2], -point[1]).multiplyScalar(.001));
+    }
+    function positionDistanceLabel() {
+      if (!inspection.midpoint || !views[0]) return;
+      const projected = inspection.midpoint.clone().project(sharedCamera), label = $('distance-label');
+      label.hidden = projected.z < -1 || projected.z > 1 || Math.abs(projected.x) > 1 || Math.abs(projected.y) > 1;
+      if (label.hidden) return;
+      const view = views[0], viewport = view.renderer.getViewport(new THREE.Vector4());
+      const rect = view.renderer.domElement.getBoundingClientRect();
+      label.style.left = `${(viewport.x + (projected.x + 1) * viewport.z / 2) * rect.width / view.element.clientWidth}px`;
+      label.style.top = `${(view.element.clientHeight - viewport.y - (projected.y + 1) * viewport.w / 2) * rect.height / view.element.clientHeight - 10}px`;
+    }
+    function drawDistance(result) {
+      const p1 = modelPointToScene(result.p1), p2 = modelPointToScene(result.p2), group = new THREE.Group();
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([p1, p2]), new THREE.LineBasicMaterial({ color: 0xffbb66, depthTest: false }));
+      line.renderOrder = 30; group.add(line);
+      for (const point of [p1, p2]) {
+        const marker = new THREE.Points(new THREE.BufferGeometry().setFromPoints([point]), new THREE.PointsMaterial({ color: 0xffbb66, size: 9, sizeAttenuation: false, depthTest: false }));
+        marker.renderOrder = 31; group.add(marker);
+      }
+      inspection.distanceGroup = group; inspection.midpoint = p1.clone().add(p2).multiplyScalar(.5);
+      views[0].scene.add(group); $('distance-label').textContent = mm(result.distance); render();
+    }
+    async function selectSubshape(hit) {
+      if (inspection.selected.length === 2) clearMeasurement();
+      clearHover(false);
+      const object = hit.object, kind = selectionKind(object), existing = inspection.selected.find(item => item.object === object);
+      inspection.selected.push({ object, kind, shape: shapeReference(object), material: existing?.material || object.material, order: existing?.order ?? object.renderOrder });
+      object.material = inspectionMaterials.selected[kind]; object.renderOrder = kind === 'face' ? 1 : 20;
+      render();
+      if (inspection.selected.length === 1) { showMeasurement(`${kind[0].toUpperCase() + kind.slice(1)} selected. Select the second subshape.`); return; }
+      const [first, second] = inspection.selected, token = ++inspection.token;
+      showMeasurement('Calculating exact minimum distance…');
+      try {
+        const result = await request('distance', { a: first.shape, b: second.shape });
+        if (token !== inspection.token || busy) return;
+        drawDistance(result);
+        showMeasurement(`${first.kind} to ${second.kind}: ${mm(result.distance)}\n` +
+          `ΔX: ${mm(Math.abs(result.p2[0] - result.p1[0]))} · ΔY: ${mm(Math.abs(result.p2[1] - result.p1[1]))} · ΔZ: ${mm(Math.abs(result.p2[2] - result.p1[2]))}\nClick another subshape to start again.`);
+      } catch (error) { if (token === inspection.token) showMeasurement(`Measurement failed: ${error.message}`); }
+    }
+    function bindInspection() {
+      const canvas = views[0].renderer.domElement;
+      canvas.addEventListener('pointermove', hoverSubshape);
+      canvas.addEventListener('pointerleave', () => { inspection.down = null; clearHover(); });
+      canvas.addEventListener('pointercancel', () => { inspection.down = null; clearHover(); });
+      canvas.addEventListener('pointerdown', event => {
+        if (event.button === 0) inspection.down = { x: event.clientX, y: event.clientY, id: event.pointerId, moved: false };
+      });
+      canvas.addEventListener('pointermove', event => {
+        if (inspection.down && Math.hypot(event.clientX - inspection.down.x, event.clientY - inspection.down.y) > 4) inspection.down.moved = true;
+      });
+      canvas.addEventListener('pointerup', event => {
+        const down = inspection.down; inspection.down = null;
+        if (busy || event.button !== 0 || !down || down.id !== event.pointerId || down.moved || Math.hypot(event.clientX - down.x, event.clientY - down.y) > 4) return;
+        const hit = pickSubshape(event);
+        if (hit) selectSubshape(hit).catch(error => showMeasurement(`Selection failed: ${error.message}`));
+      });
+      $('clear-measurement').addEventListener('click', clearMeasurement);
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') clearMeasurement();
+      });
+    }
+
+    async function loadFile(file) {
+      if (!file) return;
+      if (busy) { status('Please wait for the current file to finish loading.', 'busy'); return; }
+      if (!/\.(step|stp)$/i.test(file.name)) { status('Choose one .step or .stp file.', 'error'); return; }
+      setBusy(true);
+      status(`Opening ${file.name}…`, 'busy');
+      const started = performance.now();
+      let nextModel = null, nextObject = null;
+      try {
+        const result = await request('open', { name: file.name, bytes: await file.arrayBuffer() });
+        nextModel = result.model.modelId;
+        const gltf = await new GLTFLoader().parseAsync(result.glb.data.buffer, '');
+        nextObject = gltf.scene;
+        nextObject.traverse(o => {
+          if (o.isMesh) { o.material.color.setHex(0x80c9e4); o.material.metalness = .15; o.material.roughness = .37; }
+          if (o.isLine) { o.material.color.setHex(0x244762); o.material.transparent = true; o.material.opacity = .6; }
+          if (o.isPoints) { o.material.color.setHex(0x9fe4ff); o.material.size = 2; o.material.sizeAttenuation = false; }
+        });
+        const bounds = new THREE.Box3().setFromObject(nextObject), size = bounds.getSize(new THREE.Vector3());
+        if (bounds.isEmpty() || ![...bounds.min, ...bounds.max].every(Number.isFinite)) throw new Error('This STEP file has no drawable geometry.');
+        const nextNormalization = { center: bounds.getCenter(new THREE.Vector3()), scale: 1 / Math.max(size.x, size.y, size.z, .000001) };
+        if (modelId) await request('release', { modelId });
+        clearView(views[0]);
+        modelId = nextModel; normalization = nextNormalization;
+        views[0].model = nextObject; views[0].content.add(nextObject); normalizeView(views[0]);
+        attachInspection();
+        $('output-empty').hidden = true;
+        const { faces, solids, valid, surfaceCounts, warnings } = result.model.diagnostics;
+        const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+        $('output-name').textContent = file.name; $('output-name').title = file.name;
+        $('output-stats').textContent = `${formatNumber(faces)} faces · ${formatNumber(solids)} solids`;
+        $('output-message').textContent = 'Hover to inspect · Select two shapes to measure';
+        $('output-badge').textContent = valid ? 'STEP model' : 'Check details';
+        $('runtime').textContent = result.info.threaded ? `Threaded · ${result.info.workers} workers` : 'Single-thread · local';
+        const notes = [...warnings, ...result.glb.warnings];
+        $('diagnostics').hidden = false;
+        $('diagnostics-text').textContent = [`${file.name} · ${(file.size / 1024).toFixed(1)} KB`,
+          `${faces} faces · ${solids} solids · Measurements in millimeters`,
+          ...Object.entries(surfaceCounts).map(([kind, count]) => `${kind}: ${count}`), ...notes].join('\n');
+        setBusy(false); fitViews();
+        status(`${file.name} opened in ${elapsed}s.${notes.length ? ' See Model details for notices.' : ' Hover over edges or select two faces, edges, or vertices to measure.'}`);
+      } catch (error) {
+        if (nextModel && nextModel !== modelId) await request('release', { modelId: nextModel }).catch(() => {});
+        if (nextObject && nextObject !== views[0].model) disposeObject(nextObject);
+        status(`Could not open file: ${error.message}`, 'error');
+      } finally { $('file').value = ''; setBusy(false); }
+    }
+
+    createView('output-view'); bindInspection(); resizeViews();
+    $('open-file').addEventListener('click', () => $('file').click());
+    $('file').addEventListener('change', event => {
+      const files = [...event.target.files]; event.target.value = '';
+      if (files.length === 1) void loadFile(files[0]);
+    });
+    document.querySelector('.reset-view').addEventListener('click', fitViews);
+    const dropArea = $('output-view');
+    let dragDepth = 0;
+    window.addEventListener('dragover', event => event.preventDefault());
+    window.addEventListener('drop', event => event.preventDefault());
+    dropArea.addEventListener('dragenter', event => {
+      event.preventDefault();
+      if (Array.from(event.dataTransfer.types).includes('Files')) { dragDepth++; dropArea.classList.add('dragging'); }
+    });
+    dropArea.addEventListener('dragover', event => { event.preventDefault(); event.dataTransfer.dropEffect = busy ? 'none' : 'copy'; });
+    dropArea.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; dropArea.classList.remove('dragging'); } });
+    dropArea.addEventListener('drop', event => {
+      event.preventDefault(); dragDepth = 0; dropArea.classList.remove('dragging');
+      if (event.dataTransfer.files.length !== 1) { status('Drop one STEP file at a time.', 'error'); return; }
+      void loadFile(event.dataTransfer.files[0]);
+    });
+    window.addEventListener('pagehide', () => { worker?.terminate(); if (workerUrl) URL.revokeObjectURL(workerUrl); });
+    if (location.protocol === 'file:') status('Serve this viewer over HTTP or HTTPS to load models.', 'error');
+  </script>
+</body>
+</html>

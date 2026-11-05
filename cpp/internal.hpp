@@ -85,6 +85,8 @@ Patch thread_patch(const Mesh &mesh, const Topology &top, const std::vector<unsi
 void design_size(Mesh &mesh, std::vector<Patch> &patches, Context &context);
 TopoDS_Shape reconstruct(const Mesh &mesh, const std::vector<Patch> &patches, Context &context);
 TopoDS_Shape faceted(const Mesh &mesh, double tolerance);
+TopoDS_Shape tidy_shape(const TopoDS_Shape &shape, const Mesh &mesh,
+                        const std::vector<Patch> &patches, double tolerance);
 TopoDS_Shape recover(const Mesh &mesh, const std::vector<Patch> &patches, Context &context);
 TopoDS_Shape unite(const std::vector<TopoDS_Shape> &shapes, Context &context);
 bool inspect(const TopoDS_Shape &shape, Diagnostics &info);

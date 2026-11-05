@@ -1,18 +1,21 @@
 #include "model_internal.hpp"
 #include "occt_error.hpp"
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepGProp.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Tool.hxx>
 #include <GCPnts_TangentialDeflection.hxx>
+#include <GProp_GProps.hxx>
 #include <IMeshTools_Parameters.hxx>
+#include <NCollection_IndexedDataMap.hxx>
+#include <NCollection_List.hxx>
 #include <Poly_Polygon3D.hxx>
 #include <Poly_PolygonOnTriangulation.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Precision.hxx>
 #include <TopExp.hxx>
-#include <NCollection_IndexedDataMap.hxx>
-#include <NCollection_List.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -153,6 +156,30 @@ GltfFile Model::export_gltf(const GltfExportOptions &options) const {
         BRepMesh_IncrementalMesh mesh(shape, parameters);
         if (!mesh.IsDone())
             throw std::runtime_error("Shape tessellation failed");
+        // A valid sliver face can be smaller than the requested deflection.
+        // OCCT may finish the body mesh while leaving that face empty. Retry
+        // only missing faces at a finer scale, preserving the exact topology
+        // and graph identities used by the retained model.
+        for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next()) {
+            auto face = TopoDS::Face(ex.Current());
+            TopLoc_Location location;
+            auto triangles = BRep_Tool::Triangulation(face, location);
+            if (!triangles.IsNull() && triangles->NbTriangles())
+                continue;
+            GProp_GProps properties;
+            BRepGProp::SurfaceProperties(face, properties);
+            double area = std::abs(properties.Mass());
+            auto fine = parameters;
+            fine.Deflection = options.linear_deflection * .1;
+            if (std::isfinite(area) && area > 0)
+                fine.Deflection = std::min(fine.Deflection, std::sqrt(area) * .001);
+            fine.Deflection = std::max(1e-8, std::min(1e-5, fine.Deflection));
+            fine.Angle = std::min(options.angular_deflection, .1);
+            fine.MinSize = 1e-8;
+            fine.InParallel = false;
+            fine.AdjustMinSize = true;
+            BRepMesh_IncrementalMesh retry(face, fine);
+        }
         NCollection_IndexedDataMap<TopoDS_Shape, NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher>
             edge_faces;
         TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);

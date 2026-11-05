@@ -1,8 +1,10 @@
 #include "internal.hpp"
 #include "occt_error.hpp"
 #include "projection.hpp"
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -14,12 +16,16 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepCheck_Result.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRepLib.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_History.hxx>
+#include <BRepTools_ReShape.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Eigen/Geometry>
+#include <GCPnts_AbscissaPoint.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom2d_Line.hxx>
@@ -30,9 +36,11 @@
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GeomProjLib.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <Geom_BSplineSurface.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_Line.hxx>
 #include <Geom_Plane.hxx>
+#include <ShapeAnalysis_ShapeTolerance.hxx>
 #include <ShapeFix_Edge.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
@@ -48,6 +56,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <nanoflann.hpp>
 #include <set>
 #include <tuple>
 
@@ -96,6 +105,32 @@ void trace_invalid_faces(const TopoDS_Shape &shape, const std::vector<Patch> *pa
         std::string message = "invalid face=" + std::to_string(number) + " surface=" +
                               std::to_string(int(BRepAdaptor_Surface(face).GetType()));
         auto support = BRep_Tool::Surface(face);
+        if (std::getenv("STL2CURVES_TRACE_GEOMETRY")) {
+            unsigned samples = 0;
+            for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More() && samples < 3;
+                 edges.Next()) {
+                auto edge = TopoDS::Edge(edges.Current());
+                double first, last, pfirst, plast;
+                auto curve = BRep_Tool::Curve(edge, first, last);
+                auto pc = BRep_Tool::CurveOnSurface(edge, face, pfirst, plast);
+                if (curve.IsNull() || pc.IsNull())
+                    continue;
+                double gap = 0;
+                for (unsigned i = 0; i <= 16; ++i) {
+                    double t = first + (last - first) * i / 16;
+                    auto uv = pc->Value(t);
+                    gap = std::max(gap, curve->Value(t).Distance(support->Value(uv.X(), uv.Y())));
+                }
+                if (gap > BRep_Tool::Tolerance(edge)) {
+                    message +=
+                        " pcurve-gap/tol=" + std::to_string(gap / BRep_Tool::Tolerance(edge)) +
+                        " gap=" + std::to_string(gap) + " range=" + std::to_string(first) + ":" +
+                        std::to_string(last) + "/" + std::to_string(pfirst) + ":" +
+                        std::to_string(plast);
+                    ++samples;
+                }
+            }
+        }
         if (patches)
             for (unsigned i = 0; i < patches->size(); ++i)
                 if (support == (*patches)[i].surface)
@@ -120,6 +155,136 @@ void trace_invalid_faces(const TopoDS_Shape &shape, const std::vector<Patch> *pa
     (void)shape;
     (void)patches;
 #endif
+}
+bool repair_planar_pcurves(const TopoDS_Shape &shape, double tolerance) {
+    BRep_Builder builder;
+    ShapeFix_Edge fix;
+    bool bounded = true;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        auto face = TopoDS::Face(it.Current());
+        if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane ||
+            BRepCheck_Analyzer(face).IsValid())
+            continue;
+        // Sewing can replace a planar chord by its curved neighbor's edge.
+        // Its old pcurve then no longer describes the retained 3D curve.
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+            auto edge = TopoDS::Edge(edges.Current());
+            if (BRep_Tool::Degenerated(edge))
+                continue;
+            double first, last;
+            auto curve = BRep_Tool::Curve(edge, first, last);
+            if (curve.IsNull())
+                return false;
+            double error = std::min(1e-7, tolerance * .01);
+            auto pc = GeomProjLib::Curve2d(curve, first, last, BRep_Tool::Surface(face), error);
+            if (pc.IsNull())
+                return false;
+            // A planar pcurve can be computed implicitly by BRep_Tool, in
+            // which case FixAddPCurve considers it present and adds nothing.
+            // Store it explicitly so SameParameter measures the real gap.
+            builder.UpdateEdge(edge, pc, face, std::max(error, BRep_Tool::Tolerance(edge)));
+            builder.Range(edge, face, first, last);
+            builder.SameRange(edge, false);
+            builder.SameParameter(edge, false);
+            fix.FixSameParameter(edge, face, tolerance * .01);
+            bounded = bounded && BRep_Tool::Tolerance(edge) <= tolerance;
+        }
+    }
+    return bounded;
+}
+using SurfaceOwners = std::map<const Geom_Surface *, unsigned>;
+void failed_patches(const TopoDS_Shape &shape, const std::vector<Patch> &patches, double tolerance,
+                    std::set<unsigned> &failed, const SurfaceOwners &owners) {
+    auto blame = [&](const TopoDS_Face &face) {
+        auto surface = BRep_Tool::Surface(face);
+        auto owner = owners.find(surface.get());
+        if (owner != owners.end()) {
+            failed.insert(owner->second);
+            return;
+        }
+        for (unsigned i = 0; i < patches.size(); ++i)
+            if (surface == patches[i].surface)
+                failed.insert(i);
+    };
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        auto face = TopoDS::Face(it.Current());
+        bool invalid = !BRepCheck_Analyzer(face).IsValid();
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next())
+            invalid = invalid || BRep_Tool::Tolerance(TopoDS::Edge(edges.Current())) > tolerance;
+        if (invalid)
+            blame(face);
+    }
+    ShapeAncestors incidence;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, incidence);
+    for (int i = 1; i <= incidence.Extent(); ++i)
+        if (!BRep_Tool::Degenerated(TopoDS::Edge(incidence.FindKey(i))) &&
+            incidence.FindFromIndex(i).Extent() != 2)
+            for (const auto &face : incidence.FindFromIndex(i))
+                blame(TopoDS::Face(face));
+}
+TopoDS_Shape heal_candidate(const TopoDS_Shape &shape, const Mesh &mesh,
+                            const std::vector<Patch> &patches, double tolerance) {
+    // Precision is a working resolution, not permission to move every corner
+    // by the sewing tolerance. Coarse precision collapses short STL edges.
+    for (double precision : {std::min(1e-7, tolerance), std::min(1e-5, tolerance * .001),
+                             std::min(1e-4, tolerance * .01)}) {
+        BRepBuilderAPI_Copy copy(shape, true, false);
+        ShapeFix_Shape fix(copy.Shape());
+        fix.SetPrecision(precision);
+        fix.SetMaxTolerance(tolerance);
+        fix.Perform();
+        auto repaired = fix.Shape();
+        if (repaired.IsNull())
+            continue;
+        if (!BRepCheck_Analyzer(repaired).IsValid()) {
+            if (!repair_planar_pcurves(repaired, tolerance))
+                continue;
+            ShapeFix_Shape again(repaired);
+            again.SetPrecision(precision);
+            again.SetMaxTolerance(tolerance);
+            again.Perform();
+            repaired = again.Shape();
+        }
+        ShapeAnalysis_ShapeTolerance analysis;
+        if (!repaired.IsNull() && BRepCheck_Analyzer(repaired).IsValid() &&
+            analysis.Tolerance(repaired, 1) <= tolerance && volume_agrees(repaired, mesh, patches))
+            return repaired;
+    }
+    return {};
+}
+TopoDS_Shape without_collapsed_edges(const TopoDS_Shape &input, double tolerance) {
+    // Upstream _without_collapsed: a short open curve whose vertices sewing
+    // merged is not a genuine closed outline. Leaving it pinches the wire.
+    if (input.IsNull())
+        return input;
+    ShapeMap edges;
+    TopExp::MapShapes(input, TopAbs_EDGE, edges);
+    Handle(BRepTools_ReShape) reshape;
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        auto edge = TopoDS::Edge(edges(i));
+        if (BRep_Tool::Degenerated(edge) ||
+            !TopExp::FirstVertex(edge).IsSame(TopExp::LastVertex(edge)))
+            continue;
+        BRepAdaptor_Curve curve(edge);
+        if (curve.Value(curve.FirstParameter()).Distance(curve.Value(curve.LastParameter())) >
+                1e-6 &&
+            GCPnts_AbscissaPoint::Length(curve) <= 2 * tolerance) {
+            if (reshape.IsNull())
+                reshape = new BRepTools_ReShape;
+            reshape->Remove(edge);
+        }
+    }
+    if (reshape.IsNull())
+        return input;
+    auto shape = reshape->Apply(input);
+    Handle(BRepTools_ReShape) bare;
+    for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next())
+        if (!TopExp_Explorer(faces.Current(), TopAbs_EDGE).More()) {
+            if (bare.IsNull())
+                bare = new BRepTools_ReShape;
+            bare->Remove(faces.Current());
+        }
+    return bare.IsNull() ? shape : bare->Apply(shape);
 }
 TopoDS_Shape close_shells(const TopoDS_Shape &sewn, double tolerance) {
     std::vector<TopoDS_Solid> solids;
@@ -202,7 +367,142 @@ TopoDS_Shape close_shells(const TopoDS_Shape &sewn, double tolerance) {
         }
     return out.size() == 1 ? out.front() : compound(out);
 }
-using Boundaries = std::map<Edge, TopoDS_Edge>;
+struct BoundaryCloud {
+    const std::vector<Vec> &points;
+    std::size_t kdtree_get_point_count() const { return points.size(); }
+    double kdtree_get_pt(std::size_t i, std::size_t d) const { return points[i][d]; }
+    template <class T> bool kdtree_get_bbox(T &) const { return false; }
+};
+TopoDS_Shape rejoin_exact(TopoDS_Shape shape, const Mesh &mesh, double tolerance) {
+    // Upstream _rejoin: join exact copies before sewing, but leave every
+    // corner meeting a short edge to sewing so that it can collapse together.
+    constexpr double snap = 1e-7;
+    BoundaryCloud cloud{mesh.points};
+    using Tree =
+        nanoflann::KDTreeSingleIndexAdaptor<nanoflann::L2_Simple_Adaptor<double, BoundaryCloud>,
+                                            BoundaryCloud, 3, std::size_t>;
+    Tree tree(3, cloud, nanoflann::KDTreeSingleIndexAdaptorParams(16));
+    tree.buildIndex();
+    ShapeMap vertices;
+    TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
+    std::set<int> short_vertices;
+    for (TopExp_Explorer ex(shape, TopAbs_EDGE); ex.More(); ex.Next()) {
+        auto edge = TopoDS::Edge(ex.Current());
+        if (BRep_Tool::Degenerated(edge))
+            continue;
+        auto a = TopExp::FirstVertex(edge), b = TopExp::LastVertex(edge);
+        if (!a.IsNull() && !b.IsNull() &&
+            BRep_Tool::Pnt(a).Distance(BRep_Tool::Pnt(b)) <= 2 * tolerance) {
+            short_vertices.insert(vertices.FindIndex(a));
+            short_vertices.insert(vertices.FindIndex(b));
+        }
+    }
+    std::map<std::size_t, std::vector<int>> groups;
+    for (int i = 1; i <= vertices.Extent(); ++i) {
+        auto p = BRep_Tool::Pnt(TopoDS::Vertex(vertices(i)));
+        double query[]{p.X(), p.Y(), p.Z()}, distance;
+        std::size_t nearest;
+        if (tree.knnSearch(query, 1, &nearest, &distance) && distance <= snap * snap)
+            groups[nearest].push_back(i);
+    }
+    BRep_Builder builder;
+    Handle(BRepTools_ReShape) reshape = new BRepTools_ReShape;
+    for (const auto &item : groups) {
+        const auto &ids = item.second;
+        if (ids.size() < 2 ||
+            std::any_of(ids.begin(), ids.end(), [&](int i) { return short_vertices.count(i); }))
+            continue;
+        auto keep = TopoDS::Vertex(vertices(ids.front()));
+        double reach = BRep_Tool::Tolerance(keep);
+        for (int i : ids) {
+            auto vertex = TopoDS::Vertex(vertices(i));
+            reach = std::max(reach, BRep_Tool::Tolerance(vertex) +
+                                        BRep_Tool::Pnt(vertex).Distance(BRep_Tool::Pnt(keep)));
+        }
+        builder.UpdateVertex(keep, reach);
+        for (std::size_t i = 1; i < ids.size(); ++i)
+            reshape->Replace(vertices(ids[i]), keep.Oriented(vertices(ids[i]).Orientation()));
+    }
+    shape = reshape->Apply(shape);
+    ShapeAncestors incidence;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, incidence);
+    vertices.Clear();
+    TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
+    std::map<int, std::pair<int, int>> ends;
+    short_vertices.clear();
+    for (int i = 1; i <= incidence.Extent(); ++i) {
+        auto edge = TopoDS::Edge(incidence.FindKey(i));
+        if (BRep_Tool::Degenerated(edge))
+            continue;
+        auto a = TopExp::FirstVertex(edge), b = TopExp::LastVertex(edge);
+        if (a.IsNull() || b.IsNull())
+            continue;
+        int ia = vertices.FindIndex(a), ib = vertices.FindIndex(b);
+        ends[i] = {ia, ib};
+        if (BRep_Tool::Pnt(a).Distance(BRep_Tool::Pnt(b)) <= 2 * tolerance) {
+            short_vertices.insert(ia);
+            short_vertices.insert(ib);
+        }
+    }
+    std::map<std::pair<int, int>, std::vector<int>> pairs;
+    for (const auto &item : ends)
+        if (incidence.FindFromIndex(item.first).Extent() == 1 &&
+            !short_vertices.count(item.second.first) && !short_vertices.count(item.second.second))
+            pairs[std::minmax(item.second.first, item.second.second)].push_back(item.first);
+    reshape = new BRepTools_ReShape;
+    auto face_of = [&](int i) { return TopoDS::Face(incidence.FindFromIndex(i).First()); };
+    auto flat = [&](int i) { return BRepAdaptor_Surface(face_of(i)).GetType() == GeomAbs_Plane; };
+    for (const auto &item : pairs) {
+        std::set<int> used;
+        for (int x : item.second)
+            for (int y : item.second) {
+                if (used.count(x))
+                    break;
+                if (x == y || used.count(y) || face_of(x).IsSame(face_of(y)))
+                    continue;
+                int k = flat(x) && !flat(y) ? y : x, r = k == x ? y : x;
+                auto keep = TopoDS::Edge(incidence.FindKey(k)),
+                     replace = TopoDS::Edge(incidence.FindKey(r));
+                BRepAdaptor_Curve ck(keep), cr(replace);
+                if (ck.Value((ck.FirstParameter() + ck.LastParameter()) / 2)
+                        .Distance(cr.Value((cr.FirstParameter() + cr.LastParameter()) / 2)) >
+                    10 * snap)
+                    continue;
+                bool same_way = TopExp::FirstVertex(keep).IsSame(TopExp::FirstVertex(replace));
+                bool same_params = std::abs(ck.FirstParameter() - cr.FirstParameter()) <= 1e-9 &&
+                                   std::abs(ck.LastParameter() - cr.LastParameter()) <= 1e-9;
+                if (!(same_way && same_params) &&
+                    (!flat(r) || ck.GetType() != cr.GetType() ||
+                     (ck.GetType() != GeomAbs_Line && ck.GetType() != GeomAbs_Circle)))
+                    continue;
+                double tol = std::max(BRep_Tool::Tolerance(keep), BRep_Tool::Tolerance(replace));
+                if (!flat(r)) {
+                    auto face = face_of(r);
+                    double first, last;
+                    auto pc = BRep_Tool::CurveOnSurface(replace, face, first, last);
+                    if (pc.IsNull())
+                        continue;
+                    TopLoc_Location location;
+                    auto surface = BRep_Tool::Surface(face, location);
+                    builder.UpdateEdge(keep, pc, surface, location, tol);
+                } else
+                    builder.UpdateEdge(keep, tol);
+                reshape->Replace(replace.Oriented(TopAbs_FORWARD),
+                                 keep.Oriented(same_way ? TopAbs_FORWARD : TopAbs_REVERSED));
+                used.insert(x);
+                used.insert(y);
+            }
+    }
+    return reshape->Apply(shape);
+}
+struct Boundaries {
+    std::map<Edge, TopoDS_Edge> edges;
+    std::map<unsigned, TopoDS_Vertex> vertices;
+    std::vector<bool> crowded;
+    bool separate(const Edge &edge) const {
+        return !crowded.empty() && (crowded[edge.a] || crowded[edge.b]);
+    }
+};
 struct Rim {
     unsigned from, to, count = 0;
 };
@@ -219,18 +519,68 @@ std::map<Edge, Rim> patch_rim(const Mesh &mesh, const std::vector<unsigned> &ids
     }
     return rim;
 }
+std::vector<std::vector<unsigned>> unpinched_groups(const std::vector<Tri> &triangles) {
+    // Python _unpinched: grow across shared edges without adding a triangle
+    // that also touches the group at an isolated corner. Such a pinch cannot
+    // form one valid trimming wire, but usually needs only two or three faces.
+    std::map<Edge, std::vector<unsigned>> by_edge;
+    for (unsigned i = 0; i < triangles.size(); ++i)
+        for (unsigned k = 0; k < 3; ++k)
+            by_edge[Edge(triangles[i][k], triangles[i][(k + 1) % 3])].push_back(i);
+    std::vector<int> owner(triangles.size(), -1);
+    std::vector<std::vector<unsigned>> groups;
+    for (unsigned start = 0; start < triangles.size(); ++start) {
+        if (owner[start] >= 0)
+            continue;
+        int g = int(groups.size());
+        owner[start] = g;
+        std::vector<unsigned> members{start}, stack{start};
+        std::set<unsigned> vertices(triangles[start].begin(), triangles[start].end());
+        while (!stack.empty()) {
+            auto t = triangles[stack.back()];
+            stack.pop_back();
+            for (unsigned k = 0; k < 3; ++k) {
+                Edge edge(t[k], t[(k + 1) % 3]);
+                for (auto u : by_edge[edge]) {
+                    if (owner[u] >= 0)
+                        continue;
+                    unsigned third = triangles[u][0];
+                    for (auto v : triangles[u])
+                        if (v != edge.a && v != edge.b)
+                            third = v;
+                    if (vertices.count(third)) {
+                        bool linked = false;
+                        for (auto v : {edge.a, edge.b}) {
+                            auto found = by_edge.find(Edge(v, third));
+                            if (found != by_edge.end())
+                                for (auto w : found->second)
+                                    linked = linked || (w != u && owner[w] == g);
+                        }
+                        if (!linked)
+                            continue;
+                    }
+                    owner[u] = g;
+                    members.push_back(u);
+                    vertices.insert(third);
+                    stack.push_back(u);
+                }
+            }
+        }
+        groups.push_back(std::move(members));
+    }
+    return groups;
+}
 std::vector<TopoDS_Face> planar_patch(const Mesh &mesh, const Patch &patch,
-                                      const Boundaries &boundaries) {
+                                      const Boundaries &boundaries, double tolerance) {
     auto top = topology(mesh);
-    std::set<unsigned> available(patch.triangles.begin(), patch.triangles.end());
+    std::vector<Tri> triangles;
+    for (auto t : patch.triangles)
+        triangles.push_back(mesh.triangles[t]);
     std::vector<TopoDS_Face> faces;
-    while (!available.empty()) {
-        std::vector<unsigned> group{*available.begin()};
-        available.erase(group[0]);
-        for (std::size_t q = 0; q < group.size(); ++q)
-            for (auto j : top.neighbors[group[q]])
-                if (available.erase(j))
-                    group.push_back(j);
+    for (const auto &local : unpinched_groups(triangles)) {
+        std::vector<unsigned> group;
+        for (auto t : local)
+            group.push_back(patch.triangles[t]);
         auto rim = patch_rim(mesh, group);
         std::map<unsigned, unsigned> next;
         for (const auto &kv : rim)
@@ -256,11 +606,13 @@ std::vector<TopoDS_Face> planar_patch(const Mesh &mesh, const Patch &patch,
                 const auto &a = mesh.points[current];
                 const auto &b = mesh.points[to];
                 area += a.dot(e) * b.dot(f) - b.dot(e) * a.dot(f);
-                auto boundary = boundaries.find(Edge(current, to));
-                if (boundary == boundaries.end())
+                auto boundary = boundaries.edges.find(Edge(current, to));
+                if (boundary == boundaries.edges.end())
                     wire.Add(BRepBuilderAPI_MakeEdge(point(a), point(b)).Edge());
                 else {
                     auto edge = boundary->second;
+                    if (boundaries.separate(Edge(current, to)))
+                        edge = TopoDS::Edge(BRepBuilderAPI_Copy(edge, true, false).Shape());
                     if (current > to)
                         edge.Reverse();
                     wire.Add(edge);
@@ -290,6 +642,42 @@ std::vector<TopoDS_Face> planar_patch(const Mesh &mesh, const Patch &patch,
         auto face = make.Face();
         if (patch.axis.dot(top.normals[group[0]]) < 0)
             face.Reverse();
+        // Match upstream _plane_face: repair rounding errors before sewing,
+        // probing on a copy before a repair can modify shared corners/edges.
+        if (!BRepCheck_Analyzer(face).IsValid()) {
+            BRepBuilderAPI_Copy copy(face, true, false);
+            ShapeFix_Face probe(TopoDS::Face(copy.Shape()));
+            probe.SetMaxTolerance(tolerance);
+            probe.Perform();
+            ShapeMap before, after;
+            TopExp::MapShapes(face, TopAbs_EDGE, before);
+            TopExp::MapShapes(probe.Face(), TopAbs_EDGE, after);
+            ShapeAnalysis_ShapeTolerance analysis;
+            bool own = analysis.Tolerance(probe.Face(), 1) > std::min(.005, tolerance) ||
+                       before.Extent() != after.Extent();
+            if (own)
+                face = probe.Face();
+            else {
+                ShapeFix_Face fix(face);
+                fix.SetMaxTolerance(tolerance);
+                fix.Perform();
+                face = fix.Face();
+            }
+            if (!BRepCheck_Analyzer(face).IsValid()) {
+                if (!own)
+                    face = TopoDS::Face(BRepBuilderAPI_Copy(face, true, false).Shape());
+                repair_planar_pcurves(face, tolerance);
+                ShapeFix_Shape fix(face);
+                double noise = std::max(1e-7, patch.deviation);
+                fix.SetPrecision(std::min(noise, tolerance));
+                fix.SetMaxTolerance(std::min(10 * noise, tolerance));
+                fix.Perform();
+                ShapeMap faces;
+                TopExp::MapShapes(fix.Shape(), TopAbs_FACE, faces);
+                if (faces.Extent() == 1)
+                    face = TopoDS::Face(faces(1));
+            }
+        }
         faces.push_back(face);
     }
     return faces;
@@ -365,19 +753,27 @@ TopoDS_Face natural_patch(const Mesh &mesh, const Patch &patch, double tolerance
     if (uhi - ulo < 1e-8 || vhi - vlo < 1e-8)
         return {};
     auto rim = patch_rim(mesh, patch.triangles);
-    double eps = 1e-5;
+    gp_Pnt middle;
+    gp_Vec middle_du, middle_dv;
+    patch.surface->D1((ulo + uhi) / 2, (vlo + vhi) / 2, middle, middle_du, middle_dv);
+    // Surface parameters have different units (angle, length, or both).
+    // A fixed UV epsilon rejects otherwise rectangular cylinder/cone rims
+    // merely because STL rounding moves their axial coordinates by microns.
+    const double rim_tolerance = std::max(1e-6, tolerance * .1);
+    const double eps_u = rim_tolerance / std::max(middle_du.Magnitude(), 1e-12),
+                 eps_v = rim_tolerance / std::max(middle_dv.Magnitude(), 1e-12);
     bool all_v = true, all_u = true;
     unsigned edges = 0;
     for (const auto &kv : rim)
         if (kv.second.count == 1) {
             ++edges;
             auto a = uv.at(kv.first.a), b = uv.at(kv.first.b);
-            bool v = (std::abs(a.Y() - vlo) < eps && std::abs(b.Y() - vlo) < eps) ||
-                     (std::abs(a.Y() - vhi) < eps && std::abs(b.Y() - vhi) < eps);
-            bool u = ((poles.count(kv.first.a) || std::abs(a.X() - ulo) < eps) &&
-                      (poles.count(kv.first.b) || std::abs(b.X() - ulo) < eps)) ||
-                     ((poles.count(kv.first.a) || std::abs(a.X() - uhi) < eps) &&
-                      (poles.count(kv.first.b) || std::abs(b.X() - uhi) < eps));
+            bool v = (std::abs(a.Y() - vlo) < eps_v && std::abs(b.Y() - vlo) < eps_v) ||
+                     (std::abs(a.Y() - vhi) < eps_v && std::abs(b.Y() - vhi) < eps_v);
+            bool u = ((poles.count(kv.first.a) || std::abs(a.X() - ulo) < eps_u) &&
+                      (poles.count(kv.first.b) || std::abs(b.X() - ulo) < eps_u)) ||
+                     ((poles.count(kv.first.a) || std::abs(a.X() - uhi) < eps_u) &&
+                      (poles.count(kv.first.b) || std::abs(b.X() - uhi) < eps_u));
             if (!u && !v)
                 return {};
             all_v = all_v && v;
@@ -442,11 +838,9 @@ std::vector<TopoDS_Face> trimmed_patch(const Mesh &mesh, const Patch &patch, dou
     auto ids = vertices(mesh, patch.triangles);
     PointProjector projector(patch.surface);
     for (auto id : ids) {
-        const auto &p = projector.perform(mesh.points[id]);
-        if (!p.NbPoints())
-            return {};
         double u, v;
-        p.LowerDistanceParameters(u, v);
+        if (!projector.chart_parameters(mesh.points[id], u, v))
+            return {};
         if (!std::isfinite(u) || !std::isfinite(v) || std::abs(u) > 1e5 || std::abs(v) > 1e5)
             return {};
         projected.emplace(id, gp_Pnt2d(u, v));
@@ -492,9 +886,15 @@ std::vector<TopoDS_Face> trimmed_patch(const Mesh &mesh, const Patch &patch, dou
             Key key{t[k], ku[k], kv[k]};
             auto found = lookup.emplace(key, unsigned(chart.size()));
             if (found.second) {
-                auto v =
-                    BRepBuilderAPI_MakeVertex(patch.surface->Value(uv[k].X(), uv[k].Y())).Vertex();
-                BRep_Builder().UpdateVertex(v, std::max(1e-6, tolerance * .1));
+                auto at = patch.surface->Value(uv[k].X(), uv[k].Y());
+                auto shared = boundaries.vertices.find(t[k]);
+                auto v = shared == boundaries.vertices.end()
+                             ? BRepBuilderAPI_MakeVertex(at).Vertex()
+                             : shared->second;
+                double error = at.Distance(BRep_Tool::Pnt(v));
+                if (error > tolerance)
+                    return {};
+                BRep_Builder().UpdateVertex(v, std::max(1e-7, error * 1.01));
                 chart.push_back({uv[k], t[k], v});
             }
             mapped[k] = found.first->second;
@@ -502,20 +902,8 @@ std::vector<TopoDS_Face> trimmed_patch(const Mesh &mesh, const Patch &patch, dou
         triangles.push_back(mapped);
     }
     std::map<Edge, Rim> edges;
-    std::vector<std::vector<unsigned>> neighbors(triangles.size());
-    std::map<Edge, std::vector<unsigned>> uses;
-    for (unsigned i = 0; i < triangles.size(); ++i) {
-        auto t = triangles[i];
-        for (unsigned k = 0; k < 3; ++k)
-            uses[Edge(t[k], t[(k + 1) % 3])].push_back(i);
-    }
-    for (const auto &item : uses)
-        if (item.second.size() == 2) {
-            neighbors[item.second[0]].push_back(item.second[1]);
-            neighbors[item.second[1]].push_back(item.second[0]);
-        }
     std::vector<TopoDS_Face> faces;
-    for (const auto &group : components(neighbors)) {
+    for (const auto &group : unpinched_groups(triangles)) {
         edges.clear();
         for (auto i : group) {
             auto t = triangles[i];
@@ -555,12 +943,19 @@ std::vector<TopoDS_Face> trimmed_patch(const Mesh &mesh, const Patch &patch, dou
                 if (delta.Magnitude() < 1e-12)
                     return {};
                 TopoDS_Edge edge;
-                auto exact = boundaries.find(Edge(a.original, b.original));
-                if (exact != boundaries.end()) {
+                auto exact = boundaries.edges.find(Edge(a.original, b.original));
+                if (exact != boundaries.edges.end()) {
                     double first, last;
                     auto curve = BRep_Tool::Curve(exact->second, first, last);
                     double error = tolerance * .01;
-                    auto pc = GeomProjLib::Curve2d(curve, first, last, patch.surface, error);
+                    Handle(Geom2d_Curve) pc;
+                    try {
+                        pc = GeomProjLib::Curve2d(curve, first, last, patch.surface, error);
+                    } catch (const Standard_Failure &failure) {
+                        // One ill-conditioned boundary projection must not
+                        // discard a valid chart spanning hundreds of facets.
+                        trace(failure_message(failure, "Shared trim projection failed"));
+                    }
                     if (!pc.IsNull()) {
                         auto middle = pc->Value((first + last) / 2);
                         double du = pu ? std::round(((a.uv.X() + b.uv.X()) / 2 - middle.X()) / pu) *
@@ -570,20 +965,36 @@ std::vector<TopoDS_Face> trimmed_patch(const Mesh &mesh, const Patch &patch, dou
                                              pv
                                        : 0;
                         pc->Translate(gp_Vec2d(du, dv));
-                        bool reverse = pc->Value(last).SquareDistance(a.uv) <
-                                       pc->Value(first).SquareDistance(a.uv);
-                        BRepBuilderAPI_MakeEdge make(pc, patch.surface, reverse ? b.shape : a.shape,
-                                                     reverse ? a.shape : b.shape, first, last);
-                        if (make.IsDone()) {
-                            edge = make.Edge();
-                            // The pcurve supplies the chart placement, not a
-                            // replacement for the exact 3D boundary. Rebuilding
-                            // it with BuildCurve3d can turn circles into splines.
-                            builder.UpdateEdge(edge, curve,
-                                               std::max(error, BRep_Tool::Tolerance(exact->second)));
-                            builder.Range(edge, first, last);
-                            if (reverse)
+                        bool reverse = (a.original > b.original) !=
+                                       (exact->second.Orientation() == TopAbs_REVERSED);
+                        if (boundaries.separate(Edge(a.original, b.original))) {
+                            auto at_first = reverse ? b.shape : a.shape,
+                                 at_last = reverse ? a.shape : b.shape;
+                            double efirst = BRep_Tool::Pnt(at_first).Distance(curve->Value(first)),
+                                   elast = BRep_Tool::Pnt(at_last).Distance(curve->Value(last));
+                            if (std::max(efirst, elast) > tolerance)
+                                return {};
+                            builder.UpdateVertex(at_first, std::max(1e-7, efirst * 1.01));
+                            builder.UpdateVertex(at_last, std::max(1e-7, elast * 1.01));
+                            BRepBuilderAPI_MakeEdge make(curve, at_first, at_last, first, last);
+                            if (make.IsDone()) {
+                                edge = make.Edge();
+                                if (reverse)
+                                    edge.Reverse();
+                            }
+                        } else {
+                            // Join both the edge and its corners before sewing.
+                            // Sharing only the corners leaves partially joined
+                            // topology when sewing later collapses a sliver.
+                            edge = exact->second;
+                            if (a.original > b.original)
                                 edge.Reverse();
+                        }
+                        if (!edge.IsNull()) {
+                            builder.UpdateEdge(
+                                edge, pc, patch.surface, TopLoc_Location(),
+                                std::max(error, BRep_Tool::Tolerance(exact->second)));
+                            builder.Range(edge, first, last);
                         }
                     }
                 }
@@ -627,6 +1038,237 @@ std::vector<TopoDS_Face> trimmed_patch(const Mesh &mesh, const Patch &patch, dou
     }
     return faces;
 }
+std::vector<TopoDS_Face> outline_patch(const Mesh &mesh, const Patch &patch,
+                                       const Boundaries &boundaries, double tolerance,
+                                       bool polygon = false) {
+    // Python _outline_face/_polygon_face: lay a 3D outline on the support
+    // and repair a private copy, without widening a neighbor's shared edges.
+    auto rim = patch_rim(mesh, patch.triangles);
+    std::map<unsigned, unsigned> next;
+    for (const auto &item : rim)
+        if (item.second.count == 1 && !next.emplace(item.second.from, item.second.to).second)
+            return {};
+    auto top = topology(mesh);
+    Vec normal = Vec::Zero();
+    double target = 0;
+    for (auto t : patch.triangles) {
+        normal += top.areas[t] * top.normals[t];
+        target += top.areas[t];
+    }
+    struct Loop {
+        TopoDS_Wire wire;
+        double area;
+    };
+    std::vector<Loop> loops;
+    while (!next.empty()) {
+        unsigned start = next.begin()->first, current = start;
+        BRepBuilderAPI_MakeWire wire;
+        double area = 0;
+        do {
+            auto found = next.find(current);
+            if (found == next.end())
+                return {};
+            unsigned to = found->second;
+            next.erase(found);
+            area += mesh.points[current].cross(mesh.points[to]).dot(normal);
+            auto edge = boundaries.edges.find(Edge(current, to));
+            if (!polygon && edge != boundaries.edges.end()) {
+                auto e = edge->second;
+                if (current > to)
+                    e.Reverse();
+                wire.Add(e);
+            } else
+                wire.Add(
+                    BRepBuilderAPI_MakeEdge(point(mesh.points[current]), point(mesh.points[to]))
+                        .Edge());
+            current = to;
+        } while (current != start);
+        if (!wire.IsDone())
+            return {};
+        loops.push_back(
+            {TopoDS::Wire(BRepBuilderAPI_Copy(wire.Wire(), true, false).Shape()), area});
+    }
+    if (loops.empty())
+        return {};
+    std::sort(loops.begin(), loops.end(),
+              [](const Loop &a, const Loop &b) { return std::abs(a.area) > std::abs(b.area); });
+    for (bool flip : {false, true}) {
+        auto outer = loops.front().wire;
+        if (flip)
+            outer.Reverse();
+        BRepBuilderAPI_MakeFace make(patch.surface, outer, false);
+        for (std::size_t i = 1; i < loops.size(); ++i) {
+            auto hole = loops[i].wire;
+            if (flip)
+                hole.Reverse();
+            make.Add(hole);
+        }
+        if (!make.IsDone())
+            continue;
+        ShapeFix_Face fix(make.Face());
+        fix.SetMaxTolerance(tolerance);
+        fix.Perform();
+        auto face = fix.Face();
+        ShapeAnalysis_ShapeTolerance analysis;
+        if (!BRepCheck_Analyzer(face).IsValid() || analysis.Tolerance(face, 1) > tolerance)
+            continue;
+        GProp_GProps properties;
+        BRepGProp::SurfaceProperties(face, properties);
+        if (std::abs(properties.Mass() - target) > .05 * target + 1e-3)
+            continue;
+        PointProjector projector(patch.surface);
+        const auto &p = projector.perform(top.centers[patch.triangles.front()]);
+        if (!p.NbPoints())
+            continue;
+        double u, v;
+        p.LowerDistanceParameters(u, v);
+        gp_Pnt position;
+        gp_Vec du, dv;
+        patch.surface->D1(u, v, position, du, dv);
+        auto n = du.Crossed(dv);
+        double dot = normal.dot(Vec(n.X(), n.Y(), n.Z()));
+        if (face.Orientation() == TopAbs_REVERSED)
+            dot = -dot;
+        if (dot < 0)
+            face.Reverse();
+        return {face};
+    }
+    return {};
+}
+std::vector<TopoDS_Face> split_patch(const Mesh &mesh, const Patch &patch,
+                                     const Boundaries &boundaries, double tolerance) {
+    // Python _split_face: cut the generous fitted support with shared 3D
+    // outline edges, rather than requiring one manually stitched UV wire.
+    // This also handles outlines that pinch into several surface pieces.
+    if (Handle(Geom_BSplineSurface)::DownCast(patch.surface).IsNull())
+        return {};
+    auto rim = patch_rim(mesh, patch.triangles);
+    std::set<unsigned> rim_vertices;
+    ShapeList tools, arguments;
+    for (const auto &item : rim)
+        if (item.second.count == 1) {
+            auto edge = boundaries.edges.find(item.first);
+            if (edge != boundaries.edges.end())
+                tools.Append(edge->second);
+            else
+                tools.Append(BRepBuilderAPI_MakeEdge(point(mesh.points[item.first.a]),
+                                                     point(mesh.points[item.first.b]))
+                                 .Edge());
+            rim_vertices.insert(item.first.a);
+            rim_vertices.insert(item.first.b);
+        }
+    if (tools.IsEmpty())
+        return {};
+    arguments.Append(BRepBuilderAPI_MakeFace(patch.surface, tolerance * .01).Face());
+    BRepAlgoAPI_Splitter splitter;
+    splitter.SetArguments(arguments);
+    splitter.SetTools(tools);
+    splitter.SetNonDestructive(true);
+    splitter.SetFuzzyValue(std::max(1e-3, 2 * patch.deviation));
+    splitter.Build();
+    if (!splitter.IsDone() || splitter.Shape().IsNull())
+        return {};
+    auto top = topology(mesh);
+    double target = 0;
+    std::vector<unsigned> inner;
+    for (auto t : patch.triangles) {
+        target += top.areas[t];
+        const auto &tri = mesh.triangles[t];
+        if (!rim_vertices.count(tri[0]) && !rim_vertices.count(tri[1]) &&
+            !rim_vertices.count(tri[2]))
+            inner.push_back(t);
+    }
+    PointProjector projector(patch.surface);
+    struct Piece {
+        TopoDS_Face face;
+        double area;
+    };
+    auto pick = [&](const std::vector<unsigned> &samples) {
+        std::vector<gp_Pnt2d> probes;
+        for (unsigned i = 0; i < std::min<std::size_t>(60, samples.size()); ++i) {
+            auto t = samples[i * samples.size() / std::min<std::size_t>(60, samples.size())];
+            const auto &p = projector.perform(top.centers[t]);
+            if (p.NbPoints()) {
+                double u, v;
+                p.LowerDistanceParameters(u, v);
+                probes.emplace_back(u, v);
+            }
+        }
+        std::vector<Piece> pieces;
+        for (TopExp_Explorer ex(splitter.Shape(), TopAbs_FACE); ex.More(); ex.Next()) {
+            auto face = TopoDS::Face(ex.Current());
+            bool hit = false;
+            for (const auto &uv : probes) {
+                BRepClass_FaceClassifier classifier(face, uv, 1e-7);
+                if (classifier.State() == TopAbs_IN || classifier.State() == TopAbs_ON) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (hit) {
+                GProp_GProps properties;
+                BRepGProp::SurfaceProperties(face, properties);
+                pieces.push_back({face, properties.Mass()});
+            }
+        }
+        return pieces;
+    };
+    auto pieces = pick(inner.empty() ? patch.triangles : inner);
+    auto total_area = [](const auto &items) {
+        double area = 0;
+        for (const auto &p : items)
+            area += p.area;
+        return area;
+    };
+    if (!inner.empty() && std::abs(total_area(pieces) - target) > .1 * target)
+        pieces = pick(patch.triangles);
+    if (pieces.empty() || pieces.size() > 10)
+        return {};
+    unsigned best = 0;
+    double error = .1 * target + 1e-3;
+    for (unsigned mask = 1; mask < (1u << pieces.size()); ++mask) {
+        double area = 0;
+        for (unsigned i = 0; i < pieces.size(); ++i)
+            if (mask & (1u << i))
+                area += pieces[i].area;
+        if (std::abs(area - target) <= error) {
+            error = std::abs(area - target);
+            best = mask;
+        }
+    }
+    std::vector<TopoDS_Face> faces;
+    ShapeAnalysis_ShapeTolerance analysis;
+    for (unsigned i = 0; i < pieces.size(); ++i)
+        if (best & (1u << i)) {
+            auto face = pieces[i].face;
+            if (!BRepCheck_Analyzer(face).IsValid()) {
+                face = TopoDS::Face(BRepBuilderAPI_Copy(face, true, false).Shape());
+                ShapeFix_Face fix(face);
+                fix.SetMaxTolerance(tolerance);
+                fix.Perform();
+                face = fix.Face();
+            }
+            if (!BRepCheck_Analyzer(face).IsValid() || analysis.Tolerance(face, 1) > tolerance)
+                return {};
+            const auto &p = projector.perform(top.centers[patch.triangles.front()]);
+            if (!p.NbPoints())
+                return {};
+            double u, v;
+            p.LowerDistanceParameters(u, v);
+            gp_Pnt position;
+            gp_Vec du, dv;
+            patch.surface->D1(u, v, position, du, dv);
+            auto normal = du.Crossed(dv);
+            double dot =
+                top.normals[patch.triangles.front()].dot(Vec(normal.X(), normal.Y(), normal.Z()));
+            if (face.Orientation() == TopAbs_REVERSED)
+                dot = -dot;
+            if (dot < 0)
+                face.Reverse();
+            faces.push_back(face);
+        }
+    return faces;
+}
 Boundaries shared_boundaries(const Mesh &mesh, const std::vector<Patch> &patches, double tolerance,
                              bool intersect_analytic = true) {
     trace("surface intersections");
@@ -636,6 +1278,35 @@ Boundaries shared_boundaries(const Mesh &mesh, const std::vector<Patch> &patches
             owner[t] = i;
     std::map<std::pair<unsigned, unsigned>, std::vector<Handle(Geom_Curve)>> intersections;
     Boundaries out;
+    // Like upstream SHARED_CROWD: let sewing own close corners rather than
+    // pre-joining only some of the faces meeting a short edge.
+    BoundaryCloud cloud{mesh.points};
+    using Tree =
+        nanoflann::KDTreeSingleIndexAdaptor<nanoflann::L2_Simple_Adaptor<double, BoundaryCloud>,
+                                            BoundaryCloud, 3, std::size_t>;
+    Tree tree(3, cloud, nanoflann::KDTreeSingleIndexAdaptorParams(16));
+    tree.buildIndex();
+    out.crowded.resize(mesh.points.size());
+    for (unsigned i = 0; i < mesh.points.size(); ++i) {
+        std::size_t nearest[2];
+        double distances[2];
+        out.crowded[i] = tree.knnSearch(mesh.points[i].data(), 2, nearest, distances) == 2 &&
+                         distances[1] <= 4 * tolerance * tolerance;
+    }
+    auto corner = [&](unsigned id, const gp_Pnt &on_curve) {
+        if (out.crowded[id]) {
+            auto vertex = BRepBuilderAPI_MakeVertex(point(mesh.points[id])).Vertex();
+            BRep_Builder().UpdateVertex(
+                vertex, std::max(1e-7, on_curve.Distance(point(mesh.points[id])) * 1.01));
+            return vertex;
+        }
+        auto found = out.vertices.emplace(id, TopoDS_Vertex{});
+        if (found.second)
+            found.first->second = BRepBuilderAPI_MakeVertex(point(mesh.points[id])).Vertex();
+        BRep_Builder().UpdateVertex(
+            found.first->second, std::max(1e-7, on_curve.Distance(point(mesh.points[id])) * 1.01));
+        return found.first->second;
+    };
     auto top = topology(mesh);
     auto analytic = [](const Patch &p) {
         return p.kind == "plane" || p.kind == "cylinder" || p.kind == "cone" ||
@@ -965,14 +1636,17 @@ Boundaries shared_boundaries(const Mesh &mesh, const std::vector<Patch> &patches
         if (std::abs(pa - pb) < 1e-12)
             continue;
         try {
-            auto edge =
-                BRepBuilderAPI_MakeEdge(selected, std::min(pa, pb), std::max(pa, pb)).Edge();
+            auto a_vertex = corner(kv.first.a, selected->Value(pa)),
+                 b_vertex = corner(kv.first.b, selected->Value(pb));
+            BRepBuilderAPI_MakeEdge make(selected, pb < pa ? b_vertex : a_vertex,
+                                         pb < pa ? a_vertex : b_vertex, std::min(pa, pb),
+                                         std::max(pa, pb));
+            if (!make.IsDone())
+                continue;
+            auto edge = make.Edge();
             if (pb < pa)
                 edge.Reverse();
-            BRep_Builder builder;
-            for (TopExp_Explorer v(edge, TopAbs_VERTEX); v.More(); v.Next())
-                builder.UpdateVertex(TopoDS::Vertex(v.Current()), std::max(1e-6, tolerance * 0.1));
-            out.emplace(kv.first, edge);
+            out.edges.emplace(kv.first, edge);
         } catch (const Standard_Failure &) { /* Keep the original boundary for this candidate. */
         }
     }
@@ -984,11 +1658,9 @@ TopoDS_Face curved_triangle(const Mesh &mesh, const Tri &tri, const Handle(Geom_
                             PointProjector &projector) {
     gp_Pnt2d uv[3];
     for (unsigned k = 0; k < 3; ++k) {
-        const auto &projection = projector.perform(mesh.points[tri[k]]);
-        if (projection.NbPoints() == 0)
-            throw std::runtime_error("Surface projection failed");
         double u, v;
-        projection.LowerDistanceParameters(u, v);
+        if (!projector.chart_parameters(mesh.points[tri[k]], u, v))
+            throw std::runtime_error("Surface projection failed");
         uv[k] = gp_Pnt2d(u, v);
     }
     // Unwrap only local triangle spans; the seam is sewn back together by OCCT.
@@ -1008,9 +1680,11 @@ TopoDS_Face curved_triangle(const Mesh &mesh, const Tri &tri, const Handle(Geom_
         throw std::runtime_error("Singular surface triangle");
     BRepBuilderAPI_MakeWire wire;
     for (unsigned k = 0; k < 3; ++k) {
-        auto boundary = boundaries.find(Edge(tri[k], tri[(k + 1) % 3]));
-        if (boundary != boundaries.end()) {
+        auto boundary = boundaries.edges.find(Edge(tri[k], tri[(k + 1) % 3]));
+        if (boundary != boundaries.edges.end()) {
             auto edge = boundary->second;
+            if (boundaries.separate(Edge(tri[k], tri[(k + 1) % 3])))
+                edge = TopoDS::Edge(BRepBuilderAPI_Copy(edge, true, false).Shape());
             if (tri[k] > tri[(k + 1) % 3])
                 edge.Reverse();
             ShapeFix_Edge fix;
@@ -1038,17 +1712,19 @@ TopoDS_Face curved_triangle(const Mesh &mesh, const Tri &tri, const Handle(Geom_
 TopoDS_Face flat_triangle(const Mesh &mesh, const Tri &tri, const Boundaries &boundaries = {}) {
     bool curved = false;
     for (unsigned k = 0; k < 3; ++k)
-        curved = curved || boundaries.count(Edge(tri[k], tri[(k + 1) % 3]));
+        curved = curved || boundaries.edges.count(Edge(tri[k], tri[(k + 1) % 3]));
     if (curved) {
         BRepBuilderAPI_MakeWire wire;
         for (unsigned k = 0; k < 3; ++k) {
-            auto found = boundaries.find(Edge(tri[k], tri[(k + 1) % 3]));
-            if (found == boundaries.end())
+            auto found = boundaries.edges.find(Edge(tri[k], tri[(k + 1) % 3]));
+            if (found == boundaries.edges.end())
                 wire.Add(BRepBuilderAPI_MakeEdge(point(mesh.points[tri[k]]),
                                                  point(mesh.points[tri[(k + 1) % 3]]))
                              .Edge());
             else {
                 auto edge = found->second;
+                if (boundaries.separate(Edge(tri[k], tri[(k + 1) % 3])))
+                    edge = TopoDS::Edge(BRepBuilderAPI_Copy(edge, true, false).Shape());
                 if (tri[k] > tri[(k + 1) % 3])
                     edge.Reverse();
                 wire.Add(edge);
@@ -1080,10 +1756,99 @@ TopoDS_Face flat_triangle(const Mesh &mesh, const Tri &tri, const Boundaries &bo
         throw std::runtime_error("Cannot build mesh facet");
     return face.Face();
 }
+std::vector<TopoDS_Shape> bad_merge_edges(const TopoDS_Shape &source,
+                                          const ShapeUpgrade_UnifySameDomain &unify) {
+    // Python _bad_merges: keep just the seams of invalid merged faces,
+    // allowing independent healthy merges to survive the next attempt.
+    auto history = unify.History();
+    if (history.IsNull())
+        return {};
+    ShapeMap faces;
+    TopExp::MapShapes(unify.Shape(), TopAbs_FACE, faces);
+    BRepCheck_Analyzer check(unify.Shape());
+    std::map<int, std::vector<TopoDS_Shape>> sources;
+    for (TopExp_Explorer ex(source, TopAbs_FACE); ex.More(); ex.Next())
+        for (const auto &image : history->Modified(ex.Current())) {
+            int i = faces.FindIndex(image);
+            if (i)
+                sources[i].push_back(ex.Current());
+        }
+    std::vector<TopoDS_Shape> apart;
+    for (const auto &item : sources) {
+        if (item.second.size() < 2 || check.IsValid(faces(item.first)))
+            continue;
+        ShapeMap seen, repeated;
+        for (const auto &face : item.second)
+            for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More(); ex.Next()) {
+                if (seen.Contains(ex.Current()))
+                    repeated.Add(ex.Current());
+                else
+                    seen.Add(ex.Current());
+            }
+        for (int i = 1; i <= repeated.Extent(); ++i)
+            apart.push_back(repeated(i));
+    }
+    return apart;
+}
+} // namespace
+TopoDS_Shape tidy_shape(const TopoDS_Shape &shape, const Mesh &mesh,
+                        const std::vector<Patch> &patches, double tolerance) {
+    // Copy topology while keeping surface identity. Copying geometry makes
+    // one shared B-spline support into a different surface for each triangle,
+    // so UnifySameDomain can no longer recognize the faces as one domain.
+    BRepBuilderAPI_Copy copy(shape, false, false);
+    auto checked = copy.Shape();
+    const double target = volume(shape), allowed = std::abs(target) * 1e-3 + 1e-3;
+    // Match Python _tidy: a failed face merge does not discard all the
+    // successful ones. Last, try joining split edges without merging faces.
+    for (bool merge_faces : {true, false}) {
+        ShapeMap apart;
+        for (unsigned attempt = 0; attempt < (merge_faces ? 3u : 1u); ++attempt) {
+            try {
+                ShapeUpgrade_UnifySameDomain merge(checked, true, merge_faces, false);
+                merge.SetLinearTolerance(std::min(.001, tolerance));
+                merge.SetAngularTolerance(.0017453292519943296);
+                for (int i = 1; i <= apart.Extent(); ++i)
+                    merge.KeepShape(apart(i));
+                merge.Build();
+                auto reduced = merge.Shape();
+                if (reduced.IsNull())
+                    break;
+                ShapeFix_Shape fix(reduced);
+                fix.SetPrecision(std::min(1e-7, tolerance));
+                fix.SetMaxTolerance(tolerance);
+                fix.Perform();
+                reduced = fix.Shape();
+                Diagnostics info;
+                ShapeAnalysis_ShapeTolerance analysis;
+                double delta = reduced.IsNull() ? 1e100 : volume(reduced) - target,
+                       widest = reduced.IsNull() ? 1e100 : analysis.Tolerance(reduced, 1);
+                trace(("same-domain candidate volume_delta=" + std::to_string(delta) +
+                       " max_tolerance=" + std::to_string(widest))
+                          .c_str());
+                if (!reduced.IsNull() && std::abs(delta) <= allowed && widest <= tolerance &&
+                    volume_agrees(reduced, mesh, patches) && inspect(reduced, info))
+                    return reduced;
+                auto more = bad_merge_edges(checked, merge);
+                if (!merge_faces || more.empty())
+                    break;
+                for (const auto &edge : more)
+                    apart.Add(edge);
+            } catch (const Standard_Failure &) {
+                break;
+            }
+        }
+    }
+    return shape;
+}
+namespace {
 TopoDS_Shape build(const Mesh &mesh, const std::vector<Patch> &patches, double tolerance,
-                   bool unify, unsigned boundary_mode = 2) {
+                   bool unify, unsigned boundary_mode = 2, std::set<unsigned> *failed = nullptr) {
     BRepBuilderAPI_Sewing sewing(tolerance, true, true, true, false);
+    std::vector<TopoDS_Shape> faces;
+    auto add = [&](const TopoDS_Shape &face) { faces.push_back(face); };
     Boundaries boundaries;
+    SurfaceOwners owners;
     if (!patches.empty() && boundary_mode)
         try {
             boundaries = shared_boundaries(mesh, patches, tolerance, boundary_mode == 2);
@@ -1092,59 +1857,138 @@ TopoDS_Shape build(const Mesh &mesh, const std::vector<Patch> &patches, double t
         }
     if (patches.empty())
         for (const auto &t : mesh.triangles)
-            sewing.Add(flat_triangle(mesh, t));
+            add(flat_triangle(mesh, t));
     else
         for (const auto &p : patches) {
-            if (p.kind == "plane") {
-                for (const auto &face : planar_patch(mesh, p, boundaries))
-                    sewing.Add(face);
-                continue;
-            }
-            auto natural = natural_patch(mesh, p, tolerance);
-            if (!natural.IsNull()) {
-                sewing.Add(natural);
-                continue;
-            }
             try {
-                auto trimmed = trimmed_patch(mesh, p, tolerance, boundaries);
-                if (!trimmed.empty()) {
-                    for (const auto &face : trimmed)
-                        sewing.Add(face);
+                if (p.kind == "plane") {
+                    for (const auto &face : planar_patch(mesh, p, boundaries, tolerance)) {
+                        owners[BRep_Tool::Surface(face).get()] = unsigned(&p - patches.data());
+                        add(face);
+                    }
                     continue;
                 }
-            } catch (
-                const Standard_Failure &) { /* Retain triangulated trims for an unsuitable chart. */
-            }
-            // Closed natural surfaces require no artificial triangulation seams or
-            // parameter-space triangles at their singular poles.
-            if ((p.kind == "sphere" || p.kind == "torus") &&
-                p.triangles.size() == mesh.triangles.size()) {
-                sewing.Add(BRepBuilderAPI_MakeFace(p.surface, tolerance).Face());
-                continue;
-            }
-            PointProjector projector(p.surface);
-            for (auto id : p.triangles) {
-                const auto &t = mesh.triangles[id];
-                // Planes keep original corners and exact shared straight edges.
-                try {
-                    if (p.kind == "plane")
-                        sewing.Add(flat_triangle(mesh, t, boundaries));
-                    else
-                        sewing.Add(
-                            curved_triangle(mesh, t, p.surface, tolerance, boundaries, projector));
-                } catch (const Standard_Failure &error) {
-                    throw std::runtime_error(p.kind + " face " + std::to_string(id) + ": " +
-                                             failure_message(error));
+                auto natural = natural_patch(mesh, p, tolerance);
+                if (!natural.IsNull()) {
+                    add(natural);
+                    continue;
                 }
+                try {
+                    // Prefer the bounded outline work in-process. Python also
+                    // uses this path for complex supports; its worker timeout
+                    // for expensive kernel cuts has no C++ call-level equivalent.
+                    std::vector<TopoDS_Face> trimmed;
+                    try {
+                        trimmed = trimmed_patch(mesh, p, tolerance, boundaries);
+                    } catch (const Standard_Failure &failure) {
+                        trace(failure_message(failure, "Trim chart failed"));
+                    }
+                    for (auto &face : trimmed)
+                        if (!BRepCheck_Analyzer(face).IsValid()) {
+                            // Python _outline_face repairs the face before testing
+                            // it. In particular, nested UV wires on a fitted
+                            // support can need orientation repair even though
+                            // every edge and parameter curve is already valid.
+                            auto own =
+                                TopoDS::Face(BRepBuilderAPI_Copy(face, false, false).Shape());
+                            BRepLib::SameParameter(own, std::min(1e-5, tolerance * .001), true);
+                            ShapeFix_Face fix(own);
+                            fix.SetPrecision(std::min(1e-7, tolerance));
+                            fix.SetMaxTolerance(tolerance);
+                            fix.Perform();
+                            ShapeAnalysis_ShapeTolerance analysis;
+                            if (BRepCheck_Analyzer(fix.Face()).IsValid() &&
+                                analysis.Tolerance(fix.Face(), 1) <= tolerance)
+                                face = fix.Face();
+                        }
+                    if ((p.kind == "freeform" || p.kind == "blend") &&
+                        (trimmed.empty() ||
+                         !std::all_of(trimmed.begin(), trimmed.end(), [](const TopoDS_Face &face) {
+                             return BRepCheck_Analyzer(face).IsValid();
+                         }))) {
+                        for (bool polygon : {false, true}) {
+                            std::vector<TopoDS_Face> outline;
+                            try {
+                                outline = outline_patch(mesh, p, boundaries, tolerance, polygon);
+                            } catch (const Standard_Failure &) { /* Try the next outline. */
+                            }
+                            if (!outline.empty()) {
+                                trimmed = std::move(outline);
+                                break;
+                            }
+                        }
+                    }
+                    auto valid_trims = [&] {
+                        return !trimmed.empty() &&
+                               std::all_of(trimmed.begin(), trimmed.end(),
+                                           [](const TopoDS_Face &face) {
+                                               return BRepCheck_Analyzer(face).IsValid();
+                                           });
+                    };
+                    if (!valid_trims()) {
+                        trimmed.clear();
+                        auto spline = Handle(Geom_BSplineSurface)::DownCast(p.surface);
+                        if (!spline.IsNull() && spline->NbUPoles() * spline->NbVPoles() <= 64 &&
+                            p.triangles.size() < 300) {
+                            try {
+                                trimmed = split_patch(mesh, p, boundaries, tolerance);
+                            } catch (const Standard_Failure &) { /* Keep the triangulated chart. */
+                            }
+                        }
+                    }
+                    if (!trimmed.empty()) {
+                        for (const auto &face : trimmed) {
+                            owners[BRep_Tool::Surface(face).get()] = unsigned(&p - patches.data());
+                            add(face);
+                        }
+                        continue;
+                    }
+                } catch (const Standard_Failure
+                             &) { /* Retain triangulated trims for an unsuitable chart. */
+                }
+                trace(("triangulated trim fallback patch=" + std::to_string(&p - patches.data()) +
+                       " kind=" + p.kind + " triangles=" + std::to_string(p.triangles.size()))
+                          .c_str());
+                // Closed natural surfaces require no artificial triangulation seams or
+                // parameter-space triangles at their singular poles.
+                if ((p.kind == "sphere" || p.kind == "torus") &&
+                    p.triangles.size() == mesh.triangles.size()) {
+                    add(BRepBuilderAPI_MakeFace(p.surface, tolerance).Face());
+                    continue;
+                }
+                PointProjector projector(p.surface);
+                for (auto id : p.triangles) {
+                    const auto &t = mesh.triangles[id];
+                    // Planes keep original corners and exact shared straight edges.
+                    try {
+                        if (p.kind == "plane")
+                            add(flat_triangle(mesh, t, boundaries));
+                        else
+                            add(curved_triangle(mesh, t, p.surface, tolerance, boundaries,
+                                                projector));
+                    } catch (const Standard_Failure &error) {
+                        throw std::runtime_error(p.kind + " face " + std::to_string(id) + ": " +
+                                                 failure_message(error));
+                    }
+                }
+            } catch (const Standard_Failure &) {
+                if (failed)
+                    failed->insert(unsigned(&p - patches.data()));
+                throw;
+            } catch (const std::runtime_error &) {
+                if (failed)
+                    failed->insert(unsigned(&p - patches.data()));
+                throw;
             }
         }
+    sewing.Add(patches.empty() ? compound(faces) : rejoin_exact(compound(faces), mesh, tolerance));
     trace("sewing");
     try {
         sewing.Perform();
     } catch (const Standard_Failure &error) {
         throw std::runtime_error(std::string("Sewing: ") + failure_message(error));
     }
-    auto sewn = sewing.SewedShape();
+    auto sewn = without_collapsed_edges(sewing.SewedShape(), tolerance);
     if (sewn.IsNull())
         throw std::runtime_error("Sewing produced an empty shape");
     TopoDS_Shape shape;
@@ -1153,67 +1997,101 @@ TopoDS_Shape build(const Mesh &mesh, const std::vector<Patch> &patches, double t
         shape = close_shells(sewn, tolerance);
         BRepLib::SameParameter(shape, std::min(1e-5, tolerance * .001), true);
     } catch (const Standard_Failure &error) {
+        if (failed)
+            failed_patches(sewn, patches, tolerance, *failed, owners);
         throw std::runtime_error(std::string("Shell closure: ") + failure_message(error));
+    } catch (const std::runtime_error &) {
+        if (failed)
+            failed_patches(sewn, patches, tolerance, *failed, owners);
+        throw;
     }
     if (!patches.empty() && boundary_mode)
         trace_invalid_faces(shape, &patches);
     if (!patches.empty() && boundary_mode == 2 && !BRepCheck_Analyzer(shape).IsValid()) {
-        ShapeFix_Shape heal(shape);
-        heal.SetPrecision(tolerance * .1);
-        heal.SetMaxTolerance(tolerance);
-        heal.Perform();
-        auto fixed = heal.Shape();
-        if (fixed.IsNull() || !BRepCheck_Analyzer(fixed).IsValid())
+        auto fixed = heal_candidate(shape, mesh, patches, tolerance);
+        if (fixed.IsNull()) {
+            if (failed)
+                failed_patches(shape, patches, tolerance, *failed, owners);
             throw std::runtime_error("Intersection-boundary topology is invalid");
+        }
         shape = fixed;
     }
     trace("same-domain reduction");
-    if (unify) {
-        try {
-            double before = volume(shape);
-            BRepBuilderAPI_Copy copy(shape);
-            ShapeUpgrade_UnifySameDomain merge(copy.Shape(), true, true, true);
-            merge.SetLinearTolerance(tolerance);
-            merge.Build();
-            auto reduced = merge.Shape();
-            if (!reduced.IsNull() && BRepCheck_Analyzer(reduced).IsValid() &&
-                std::abs(volume(reduced) - before) < std::max(.001, std::abs(before) * 1e-7))
-                shape = reduced;
-        } catch (const Standard_Failure
-                     &) { /* Same-domain reduction is optional; retain the sewn shape. */
-        }
-    }
+    if (unify)
+        shape = tidy_shape(shape, mesh, patches, tolerance);
+    if (failed)
+        failed_patches(shape, patches, tolerance, *failed, owners);
     return shape;
 }
 } // namespace
 TopoDS_Shape faceted(const Mesh &mesh, double tolerance) {
     return build(mesh, {}, tolerance, true);
 }
+namespace {
+double patch_sewing_tolerance(const Mesh &mesh, const std::vector<Patch> &patches, double minimum) {
+    // Python attempt()/sewing_cap(): allow the measured sag of a fitted
+    // patch, bounded by 0.2 mm and twice the mesh's median edge length.
+    double worst = 0;
+    for (const auto &patch : patches) {
+        if (patch.kind == "plane")
+            continue;
+        worst = std::max(worst, patch.deviation);
+        PointProjector projector(patch.surface);
+        for (auto t : patch.triangles) {
+            const auto &tri = mesh.triangles[t];
+            for (unsigned k = 0; k < 3; ++k) {
+                Vec p = (mesh.points[tri[k]] + mesh.points[tri[(k + 1) % 3]]) / 2;
+                const auto &projection = projector.perform(p);
+                if (projection.NbPoints())
+                    worst = std::max(worst, projection.LowerDistance());
+            }
+        }
+    }
+    if (1.5 * worst <= minimum)
+        return minimum;
+    std::vector<double> lengths;
+    lengths.reserve(3 * mesh.triangles.size());
+    for (const auto &tri : mesh.triangles)
+        for (unsigned k = 0; k < 3; ++k)
+            lengths.push_back((mesh.points[tri[k]] - mesh.points[tri[(k + 1) % 3]]).norm());
+    if (lengths.empty())
+        return minimum;
+    auto middle = lengths.begin() + lengths.size() / 2;
+    std::nth_element(lengths.begin(), middle, lengths.end());
+    double median = *middle;
+    if (lengths.size() % 2 == 0)
+        median = (median + *std::max_element(lengths.begin(), middle)) / 2;
+    double cap = std::max(minimum, std::min(.2, 2 * median));
+    return std::max(minimum, std::min(1.5 * worst, cap));
+}
+} // namespace
 TopoDS_Shape reconstruct(const Mesh &mesh, const std::vector<Patch> &patches, Context &ctx) {
     // Try exact analytic intersections, then smooth fitted junctions with
     // projected analytic trims, then independent projected trims. Every mode
     // must have valid topology; conversion applies the corrected-volume gate
     // before accepting a candidate or invoking faceted recovery.
-    for (unsigned mode : {2u, 1u, 0u}) {
-        try {
-            auto shape = build(mesh, patches, ctx.options.tolerance, true, mode);
-            Diagnostics info;
-            if (inspect(shape, info) && (mode == 0 || volume_agrees(shape, mesh, patches)))
-                return shape;
-            ShapeFix_Shape fix(shape);
-            fix.SetPrecision(ctx.options.tolerance);
-            fix.SetMaxTolerance(ctx.options.tolerance);
-            fix.Perform();
-            auto fixed = fix.Shape();
-            if (!fixed.IsNull() && inspect(fixed, info) &&
-                (mode == 0 || volume_agrees(fixed, mesh, patches)))
-                return fixed;
-        } catch (const Standard_Failure &error) {
-            trace(failure_message(error, "Shared-boundary reconstruction failed"));
-        } catch (const std::runtime_error &error) {
-            trace(error.what());
+    double adaptive = patch_sewing_tolerance(mesh, patches, ctx.options.tolerance);
+    std::vector<double> tolerances{ctx.options.tolerance};
+    if (adaptive > ctx.options.tolerance)
+        tolerances.push_back(adaptive);
+    for (unsigned mode : {2u, 1u, 0u})
+        for (double tolerance : tolerances) {
+            try {
+                trace(("reconstruction sewing tolerance=" + std::to_string(tolerance)).c_str());
+                auto shape = build(mesh, patches, tolerance, true, mode);
+                Diagnostics info;
+                if (inspect(shape, info) && (mode == 0 || volume_agrees(shape, mesh, patches)))
+                    return shape;
+                auto fixed = heal_candidate(shape, mesh, patches, tolerance);
+                if (!fixed.IsNull() && inspect(fixed, info) &&
+                    (mode == 0 || volume_agrees(fixed, mesh, patches)))
+                    return fixed;
+            } catch (const Standard_Failure &error) {
+                trace(failure_message(error, "Shared-boundary reconstruction failed"));
+            } catch (const std::runtime_error &error) {
+                trace(error.what());
+            }
         }
-    }
     throw std::runtime_error("No valid surface reconstruction passed the corrected-volume checks");
 }
 TopoDS_Shape recover(const Mesh &mesh, const std::vector<Patch> &patches, Context &ctx) {
@@ -1228,12 +2106,29 @@ TopoDS_Shape recover(const Mesh &mesh, const std::vector<Patch> &patches, Contex
         if (patches[i].kind != "plane")
             curved.push_back(i);
     unsigned attempts = 0;
-    auto assemble = [&](const std::set<unsigned> &selected) {
+    std::set<unsigned> faceted_planes;
+    std::vector<unsigned> owner(mesh.triangles.size());
+    for (unsigned i = 0; i < patches.size(); ++i)
+        for (auto t : patches[i].triangles)
+            owner[t] = i;
+    std::vector<std::set<unsigned>> adjacent(patches.size());
+    for (const auto &edge : top.edges)
+        if (edge.second.size() == 2) {
+            auto a = owner[edge.second[0]], b = owner[edge.second[1]];
+            if (a != b) {
+                adjacent[a].insert(b);
+                adjacent[b].insert(a);
+            }
+        }
+    auto assemble = [&](const std::set<unsigned> &selected,
+                        std::vector<unsigned> *sources = nullptr) {
         std::vector<Patch> candidate;
         for (unsigned i = 0; i < patches.size(); ++i) {
-            if (patches[i].kind == "plane" || selected.count(i))
+            if ((patches[i].kind == "plane" && !faceted_planes.count(i)) || selected.count(i)) {
                 candidate.push_back(patches[i]);
-            else
+                if (sources)
+                    sources->push_back(i);
+            } else
                 for (auto t : patches[i].triangles) {
                     Patch p;
                     p.kind = "plane";
@@ -1243,10 +2138,65 @@ TopoDS_Shape recover(const Mesh &mesh, const std::vector<Patch> &patches, Contex
                     p.surface = new Geom_Plane(
                         gp_Ax3(point(p.origin), gp_Dir(p.axis.x(), p.axis.y(), p.axis.z())));
                     candidate.push_back(std::move(p));
+                    if (sources)
+                        sources->push_back(i);
                 }
         }
         return candidate;
     };
+    // Keep healthy patches together, dropping only the supports implicated by
+    // invalid faces or open seams. A failed fitted plane also needs to revert
+    // to its actual triangles; retaining that bad plane poisons every subset.
+    std::set<unsigned> selected(curved.begin(), curved.end());
+    for (unsigned round = 0; round < 8 && !selected.empty() && !ctx.expired(); ++round) {
+        std::vector<unsigned> sources;
+        auto candidate = assemble(selected, &sources);
+        std::set<unsigned> failed;
+        ++attempts;
+        try {
+            double tolerance = patch_sewing_tolerance(mesh, candidate, ctx.options.tolerance);
+            auto shape = build(mesh, candidate, tolerance, true, 2, &failed);
+            Diagnostics info;
+            if (failed.empty() && inspect(shape, info) && volume_agrees(shape, mesh, candidate)) {
+                best = shape;
+                kept = selected;
+                break;
+            }
+        } catch (const Standard_Failure &) {
+        } catch (const std::runtime_error &) {
+        }
+        bool changed = false;
+        std::set<unsigned> failed_curves;
+        std::set<unsigned> failed_planes, failed_blends;
+        for (auto index : failed) {
+            auto original = sources.at(index);
+            if (patches[original].kind == "plane")
+                failed_planes.insert(original);
+            else
+                failed_curves.insert(original);
+            // Upstream culprits gives nearby blends the first chance to revert:
+            // their overshooting junctions can invalidate healthy neighboring
+            // planes and analytic surfaces. Dropping both sides loses curves.
+            auto blame_blend = [&](unsigned i) {
+                if (selected.count(i) && patches[i].kind == "blend")
+                    failed_blends.insert(i);
+            };
+            blame_blend(original);
+            for (auto i : adjacent[original])
+                blame_blend(i);
+        }
+        for (auto original : failed_blends)
+            changed = selected.erase(original) != 0 || changed;
+        if (!changed)
+            for (auto original : failed_planes)
+                if (patches[original].triangles.size() > 1)
+                    changed = faceted_planes.insert(original).second || changed;
+        if (!changed)
+            for (auto original : failed_curves)
+                changed = selected.erase(original) != 0 || changed;
+        if (!changed)
+            break;
+    }
     std::function<void(const std::vector<unsigned> &)> restore;
     restore = [&](const std::vector<unsigned> &group) {
         if (group.empty() || attempts >= 32 || ctx.expired())
@@ -1254,9 +2204,15 @@ TopoDS_Shape recover(const Mesh &mesh, const std::vector<Patch> &patches, Contex
         ++attempts;
         auto selected = kept;
         selected.insert(group.begin(), group.end());
-        auto candidate = assemble(selected);
+        std::vector<unsigned> sources;
+        auto candidate = assemble(selected, &sources);
+        std::set<unsigned> failed;
         try {
-            auto shape = build(mesh, candidate, ctx.options.tolerance, true, 0);
+            // Restored patches must also restore their boundaries on adjacent
+            // planar faces. Independent trims leave mesh chords facing arcs
+            // and can pass sewing while changing the reconstructed volume.
+            double tolerance = patch_sewing_tolerance(mesh, candidate, ctx.options.tolerance);
+            auto shape = build(mesh, candidate, tolerance, true, 2, &failed);
             Diagnostics info;
             if (inspect(shape, info) && volume_agrees(shape, mesh, candidate)) {
                 best = shape;
@@ -1267,12 +2223,35 @@ TopoDS_Shape recover(const Mesh &mesh, const std::vector<Patch> &patches, Contex
         } catch (const std::runtime_error &) {
         }
         if (group.size() > 1) {
+            // Python again(): retry the unblamed patches together before
+            // splitting blindly, then give each named patch its own chance.
+            std::set<unsigned> named;
+            for (auto index : failed)
+                named.insert(sources.at(index));
+            std::vector<unsigned> rest;
+            for (auto i : group)
+                if (!named.count(i))
+                    rest.push_back(i);
+            if (!rest.empty() && rest.size() < group.size()) {
+                restore(rest);
+                for (auto i : group)
+                    if (named.count(i))
+                        restore({i});
+                return;
+            }
             auto middle = group.begin() + group.size() / 2;
             restore(std::vector<unsigned>(group.begin(), middle));
             restore(std::vector<unsigned>(middle, group.end()));
         }
     };
-    restore(curved);
+    std::vector<unsigned> dropped;
+    for (auto i : curved)
+        if (!kept.count(i))
+            dropped.push_back(i);
+    restore(dropped);
+    if (!faceted_planes.empty())
+        ctx.diagnostics.fallbacks.push_back("Rebuilt " + std::to_string(faceted_planes.size()) +
+                                            " invalid planar patches from their triangles");
     ctx.diagnostics.fallbacks.push_back("Recovery retained " + std::to_string(kept.size()) +
                                         " of " + std::to_string(curved.size()) + " curved patches");
     return best;

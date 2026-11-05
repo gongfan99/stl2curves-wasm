@@ -12,7 +12,8 @@ export function createServer() {
       const name = decodeURIComponent(url.pathname.replace(/^\/(isolated|ordinary)\//, '/'));
       const target = path.resolve(root, '.' + name);
       if (!target.startsWith(root + path.sep) && target !== root) { response.writeHead(403).end(); return; }
-      const types = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.wasm': 'application/wasm' };
+      const types = { '.html': 'text/html', '.css': 'text/css', '.svg': 'image/svg+xml',
+        '.mjs': 'text/javascript', '.js': 'text/javascript', '.wasm': 'application/wasm' };
       response.setHeader('Content-Type', types[path.extname(target)] || 'application/octet-stream');
       if (isolated) {
         response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');

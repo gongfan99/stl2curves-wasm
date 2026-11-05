@@ -128,4 +128,6 @@ BuildInfo build_info();
 // Partial success is represented by retained models and per-object errors together.
 // Configuration errors throw std::invalid_argument before processing inputs.
 Result convert(const std::vector<InputFile> &inputs, const Options &options = {});
+// Read exact STEP topology into a retained model; no mesh reconstruction or fusion.
+std::shared_ptr<Model> import_step(const InputFile &input);
 } // namespace stl2curves

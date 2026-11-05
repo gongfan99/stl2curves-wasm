@@ -48,7 +48,7 @@ test('pthread bootstrap does not require application Embind exports', () => {
 test('all model APIs reject use after disposal and disposal releases models first', () => {
   const events = [];
   const module = { _clearModels() { events.push('release'); } };
-  const methods = ['convert', 'exportStep', 'exportGltf', 'getClosestPoints', 'getShapeProperties', 'releaseModel'];
+  const methods = ['convert', 'importStep', 'exportStep', 'exportGltf', 'getClosestPoints', 'getShapeProperties', 'releaseModel'];
   for (const name of methods) module[name] = (...args) => args;
   vm.runInNewContext(source, { Module: module, PThread: { terminateAllThreads() { events.push('threads'); } } });
   assert.equal(Object.keys(module.exportGltf(1)[1]).length, 0);

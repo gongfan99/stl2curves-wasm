@@ -247,7 +247,7 @@ Patch height_field(const Mesh &mesh, const Topology &top, const std::vector<unsi
                     if (i < n && j < n && i + j > 0) {
                         samples.push_back(local(
                             (double(i) * a + double(j) * b + double(n - i - j) * c) / double(n)));
-                        weights.push_back(.001);
+                        weights.push_back(.01);
                     }
         }
         std::vector<Eigen::Triplet<double>> entries;
@@ -751,6 +751,9 @@ std::vector<Patch> advanced_patches(const Mesh &mesh, const Topology &top,
     if (!ctx.options.curves)
         return {};
     const double tolerance = std::max(1e-5, std::min(0.002, ctx.options.accuracy * .02));
+    // freeform.FIT_DEV is tuned at accuracy 0.02 mm and scales to 0.01
+    // at the default 0.1 mm accuracy, where upstream caps freeform fitting.
+    const double freeform_tolerance = std::max(1e-5, std::min(.01, ctx.options.accuracy * .1));
     std::vector<double> radii;
     std::vector<Vec> axes{Vec::UnitX(), Vec::UnitY(), Vec::UnitZ()};
     for (const auto &p : recognized) {
@@ -783,10 +786,43 @@ std::vector<Patch> advanced_patches(const Mesh &mesh, const Topology &top,
                 if (owner[j] < 0 && top.normals[i].dot(top.normals[j]) > 0.72)
                     graph[i].push_back(j);
     std::vector<Patch> out;
+    std::vector<bool> covered(mesh.triangles.size(), false);
+    auto append = [&](Patch p) {
+        if (p.kind != "plane")
+            for (auto t : p.triangles)
+                covered[t] = true;
+        out.push_back(std::move(p));
+    };
+    auto restore_area = [&](const std::vector<unsigned> &ids, std::size_t first) {
+        if (freeform_tolerance <= .002 || ctx.expired())
+            return;
+        double total = 0, missing = 0;
+        for (auto t : ids) {
+            total += top.areas[t];
+            if (!covered[t])
+                missing += top.areas[t];
+        }
+        // As in Python's area-based candidate comparison, an equally complete
+        // precise reconstruction takes precedence over a looser approximation.
+        if (missing <= .01 * total)
+            return;
+        try {
+            auto p = height_field(mesh, top, ids, freeform_tolerance, ctx);
+            if (!p.surface.IsNull()) {
+                for (std::size_t i = first; i < out.size(); ++i)
+                    for (auto t : out[i].triangles)
+                        covered[t] = false;
+                out.resize(first);
+                append(std::move(p));
+            }
+        } catch (const Standard_Failure &) { /* Keep the already fitted pieces. */
+        }
+    };
     std::function<void(const std::vector<unsigned> &, unsigned)> fit_region;
     fit_region = [&](const std::vector<unsigned> &ids, unsigned depth) {
         if (ids.size() < 4 || ctx.expired())
             return;
+        const auto first = out.size();
         try {
             Patch p;
             // Narrow coplanar regions can be deferred by the analytic pass.
@@ -807,14 +843,14 @@ std::vector<Patch> advanced_patches(const Mesh &mesh, const Topology &top,
                 p.axis = axis;
                 p.triangles = ids;
                 p.surface = new Geom_Plane(gp_Ax3(point(origin), direction(axis)));
-                out.push_back(std::move(p));
+                append(std::move(p));
                 return;
             }
             if (ids.size() >= 64 && depth == 0)
                 for (const auto &axis : axes) {
                     p = thread(mesh, top, ids, axis, tolerance);
                     if (!p.surface.IsNull()) {
-                        out.push_back(std::move(p));
+                        append(std::move(p));
                         return;
                     }
                     if (ctx.expired())
@@ -824,46 +860,87 @@ std::vector<Patch> advanced_patches(const Mesh &mesh, const Topology &top,
                 return;
             p = extrusion(mesh, top, ids, tolerance);
             if (!p.surface.IsNull()) {
-                out.push_back(std::move(p));
+                append(std::move(p));
                 return;
             }
             if (!radii.empty()) {
                 p = pipe(mesh, top, ids, radii, tolerance);
                 if (!p.surface.IsNull()) {
-                    out.push_back(std::move(p));
+                    append(std::move(p));
                     return;
                 }
             }
-            p = height_field(mesh, top, ids, std::max(1e-5, tolerance * .5), ctx);
-            if (p.surface.IsNull() && !ctx.expired())
-                p = height_field(mesh, top, ids, tolerance, ctx);
+            // Python _areas excludes creases above 20 degrees from a
+            // freeform region. Extrusions and pipes get their own chance
+            // first; a height field must not smooth across these creases.
+            std::set<unsigned> remaining(ids.begin(), ids.end());
+            std::vector<std::vector<unsigned>> pieces;
+            while (!remaining.empty()) {
+                std::vector<unsigned> piece{*remaining.begin()};
+                remaining.erase(piece.front());
+                for (std::size_t q = 0; q < piece.size(); ++q)
+                    for (auto j : top.neighbors[piece[q]])
+                        if (top.normals[piece[q]].dot(top.normals[j]) > .9396926207859084 &&
+                            remaining.erase(j))
+                            piece.push_back(j);
+                pieces.push_back(std::move(piece));
+            }
+            if (pieces.size() > 1) {
+                for (const auto &piece : pieces)
+                    fit_region(piece, depth);
+                return;
+            }
+            // First retain the precise fits used by the CAD regressions.
+            // Split a region that cannot fit them before resorting to a
+            // looser whole-region fit for genuinely unexplained mesh areas.
+            p = height_field(mesh, top, ids, std::min(.001, freeform_tolerance), ctx);
+            if (p.surface.IsNull() && freeform_tolerance > .001 && !ctx.expired())
+                p = height_field(mesh, top, ids, std::min(.002, freeform_tolerance), ctx);
             if (!p.surface.IsNull()) {
-                if (depth > 0)
-                    p.kind = "blend";
-                out.push_back(std::move(p));
+                // Splitting does not turn a height field into the N-sided
+                // boundary-filled Blend model used by Python's builder.
+                append(std::move(p));
                 return;
             }
         } catch (const Standard_Failure &) { /* Reject this candidate and retain mesh geometry. */
         }
-        if (depth >= 4 || ids.size() < 16)
+        if (depth >= 4 || ids.size() < 16) {
+            restore_area(ids, first);
             return;
-        // Split by facet direction, retaining connected subregions only.
+        }
+        // Upstream _freeform_pieces splits about the area-weighted main
+        // variation of the normals, then fits each connected piece. A median
+        // split along an arbitrary perpendicular can mix separate patches.
         Vec average = Vec::Zero();
+        double area = 0;
         for (auto i : ids)
-            average += top.normals[i];
-        if (average.norm() < 1e-10)
-            average = Vec::UnitZ();
-        else
-            average.normalize();
-        Vec e = average.unitOrthogonal();
-        std::vector<unsigned> sorted = ids;
-        std::sort(sorted.begin(), sorted.end(), [&](unsigned a, unsigned b) {
-            return top.normals[a].dot(e) < top.normals[b].dot(e);
-        });
-        auto middle = sorted.begin() + sorted.size() / 2;
-        std::vector<unsigned> a(sorted.begin(), middle), b(middle, sorted.end());
-        fit_region(a, depth + 1);
-        fit_region(b, depth + 1);
+            average += top.areas[i] * top.normals[i], area += top.areas[i];
+        average /= area;
+        Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+        for (auto i : ids) {
+            Vec delta = top.normals[i] - average;
+            covariance += top.areas[i] * delta * delta.transpose();
+        }
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigen(covariance);
+        Vec axis = eigen.eigenvectors().col(2);
+        std::array<std::set<unsigned>, 2> halves;
+        for (auto i : ids)
+            halves[(top.normals[i] - average).dot(axis) > 0].insert(i);
+        if (halves[0].empty() || halves[1].empty()) {
+            restore_area(ids, first);
+            return;
+        }
+        for (auto &members : halves)
+            while (!members.empty()) {
+                std::vector<unsigned> piece{*members.begin()};
+                members.erase(piece.front());
+                for (std::size_t q = 0; q < piece.size(); ++q)
+                    for (auto j : top.neighbors[piece[q]])
+                        if (members.erase(j))
+                            piece.push_back(j);
+                fit_region(piece, depth + 1);
+            }
+        restore_area(ids, first);
     };
     for (const auto &group : components(graph))
         if (group.size() >= 4 && owner[group.front()] < 0)

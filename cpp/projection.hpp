@@ -87,6 +87,24 @@ class PointProjector {
             projection_.SetExtremaFlag(Extrema_ExtFlag_MIN);
         }
     }
+    bool chart_parameters(const Vec &p, double &u, double &v) {
+        if (!affine_) {
+            const auto &projection = perform(p);
+            if (!projection.NbPoints())
+                return false;
+            projection.LowerDistanceParameters(u, v);
+            return true;
+        }
+        // A height field's chart is its base-plane coordinate system, as in
+        // Python Freeform.uvh(). Nearest-point iterations may move neighboring
+        // corners past each other on a thin triangle and fold its UV outline.
+        Vec q = p - center_;
+        Eigen::Vector4d position(q.x(), q.y(), q.z(), 1);
+        Eigen::Vector2d uv = inverse_.transpose() * position;
+        u = std::clamp(uv[0], a_, b_);
+        v = std::clamp(uv[1], c_, d_);
+        return std::isfinite(u) && std::isfinite(v);
+    }
     const SurfaceProjection &perform(const Vec &p) {
         gp_Pnt point(p.x(), p.y(), p.z());
         if (affine_) {

@@ -171,6 +171,36 @@ template <class F> val invoke(F &&operation) {
         return error_result("Error", error.what());
     }
 }
+InputFile parse_file(val file) {
+    if (file.isNull() || file.isUndefined() || file["name"].typeOf().as<std::string>() != "string")
+        type_error("Each input needs a name");
+    auto data = file["data"];
+    if (data.isNull() || data.isUndefined() ||
+        !val::global("ArrayBuffer").call<bool>("isView", data) ||
+        data["BYTES_PER_ELEMENT"].isUndefined() || data["BYTES_PER_ELEMENT"].as<unsigned>() != 1)
+        type_error("Input data must be a Uint8Array");
+    auto length = data["byteLength"].as<std::size_t>();
+    InputFile f{file["name"].as<std::string>(), Bytes(length)};
+    if (length)
+        val(emscripten::typed_memory_view(length, f.data.data())).call<void>("set", data);
+    return f;
+}
+val model_info(const std::shared_ptr<Model> &entry) {
+    auto f = val::object();
+    f.set("modelId", double(entry->id()));
+    f.set("name", entry->name());
+    f.set("root", selection(entry->root()));
+    f.set("diagnostics", diagnostics(entry->diagnostics()));
+    return f;
+}
+val import_step_file(val input) {
+    return invoke([&]() {
+        auto entry = import_step(parse_file(input));
+        auto result = model_info(entry);
+        models.emplace(entry->id(), entry);
+        return result;
+    });
+}
 val convert_files(val input, val config) {
     if (!val::global("Array").call<bool>("isArray", input))
         type_error("inputs must be an array of {name, data}");
@@ -200,33 +230,13 @@ val convert_files(val input, val config) {
     std::vector<InputFile> files;
     auto count = input["length"].as<unsigned>();
     files.reserve(count);
-    for (unsigned i = 0; i < count; ++i) {
-        auto file = input[i];
-        if (file.isNull() || file.isUndefined() ||
-            file["name"].typeOf().as<std::string>() != "string")
-            type_error("Each input needs a name");
-        auto data = file["data"];
-        if (data.isNull() || data.isUndefined() ||
-            !val::global("ArrayBuffer").call<bool>("isView", data) ||
-            data["BYTES_PER_ELEMENT"].isUndefined() ||
-            data["BYTES_PER_ELEMENT"].as<unsigned>() != 1)
-            type_error("Input data must be a Uint8Array");
-        auto length = data["byteLength"].as<std::size_t>();
-        InputFile f{file["name"].as<std::string>(), Bytes(length)};
-        if (length)
-            val(emscripten::typed_memory_view(length, f.data.data())).call<void>("set", data);
-        files.push_back(std::move(f));
-    }
+    for (unsigned i = 0; i < count; ++i)
+        files.push_back(parse_file(input[i]));
     auto result = convert(files, options);
     auto o = val::object();
     auto outputs = val::array(), errors = val::array();
     for (const auto &entry : result.models) {
-        auto f = val::object();
-        f.set("modelId", double(entry->id()));
-        f.set("name", entry->name());
-        f.set("root", selection(entry->root()));
-        f.set("diagnostics", diagnostics(entry->diagnostics()));
-        outputs.call<void>("push", f);
+        outputs.call<void>("push", model_info(entry));
     }
     for (const auto &error : result.errors) {
         auto e = val::object();
@@ -325,6 +335,7 @@ val info() {
 }
 } // namespace
 EMSCRIPTEN_BINDINGS(stl2curves_bindings) {
+    emscripten::function("importStep", &import_step_file);
     emscripten::function("convert", emscripten::optional_override([](val input, val config) {
                              return invoke([&]() { return convert_files(input, config); });
                          }));

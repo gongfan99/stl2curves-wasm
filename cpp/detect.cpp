@@ -1162,6 +1162,26 @@ std::vector<Patch> detect(const Mesh &m, Context &ctx) {
         ctx.diagnostics.repairs.push_back("Reconstructed " + std::to_string(absorbed) +
                                           " slender transition facets on adjoining surfaces");
     }
+    // Upstream _straight: remove insignificant taper after region growth.
+    // Normalize only after recognition so cylinder/cone seed pruning keeps
+    // its original support decisions, and verify every original corner.
+    for (auto &p : patches)
+        if (p.kind == "cone" && std::abs(p.secondary) < 1e-4) {
+            auto candidate = p;
+            candidate.kind = "cylinder";
+            candidate.secondary = 0;
+            double radius = 0;
+            auto ids = vertices(m, p.triangles);
+            for (auto i : ids) {
+                Vec q = m.points[i] - p.origin;
+                radius += (q - q.dot(p.axis) * p.axis).norm();
+            }
+            candidate.radius = radius / ids.size();
+            if (holds(candidate, m, top, p.triangles, 1e-4)) {
+                surface(candidate);
+                p = std::move(candidate);
+            }
+        }
     // Snap numerical noise in repeated radii and almost axial frames, retaining
     // each change only if the original mesh points still satisfy the model.
     std::vector<double> radii;

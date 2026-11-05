@@ -92,7 +92,8 @@ async function exerciseInspection(page, mode, expectedSize = 1) {
 }
 try {
   for (const mode of ['ordinary', 'isolated']) {
-    const page = await browser.newPage({ viewport: { width: 1500, height: 1050 }, acceptDownloads: true });
+    const page = await browser.newPage({ viewport: { width: 1500, height: 1050 }, acceptDownloads: true, serviceWorkers: 'block' });
+    await page.addInitScript(() => { window.coi = { shouldRegister: () => false }; });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     // Inspect the actual render state without adding a debug API to the app.

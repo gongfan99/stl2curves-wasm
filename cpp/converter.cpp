@@ -177,6 +177,14 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
                 // topology. Each part and its patches now own the final data.
                 measured = Mesh{};
                 combined = std::vector<Patch>{};
+                // Analysis has its own optional-fitting budget. As in the
+                // reference converter, start a fresh budget for building and
+                // recovering the solid so slow fitting cannot forfeit curves.
+                ctx.deadline =
+                    options.time_limit
+                        ? Clock::now() + std::chrono::duration_cast<Clock::duration>(
+                                             std::chrono::duration<double>(options.time_limit))
+                        : Clock::time_point::max();
                 std::vector<TopoDS_Shape> shapes;
                 for (auto &kv : part_meshes) {
                     auto &mesh = kv.second;

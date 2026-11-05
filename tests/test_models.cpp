@@ -291,12 +291,65 @@ void curves() {
               "natural-bound face identity");
     }
 }
+void step_import() {
+    auto source = retain(BRepPrimAPI_MakeBox(2, 3, 4).Shape());
+    auto step = source->export_step();
+    auto imported = import_step({"box.STP", step.data});
+    check(imported->name() == "box" && imported->diagnostics().valid &&
+              imported->diagnostics().faces == 6 && imported->diagnostics().solids == 1 &&
+              std::abs(imported->diagnostics().volume - 24) < 1e-7,
+          "STEP import retains topology and volume");
+    check(!json(imported->export_gltf())["meshes"].empty(), "STEP import GLB preview");
+    const auto &impl = ModelAccess::get(*imported);
+    bool measured = false;
+    for (const auto &entry : impl.occurrences)
+        if (entry.shape.ShapeType() == TopAbs_EDGE) {
+            auto properties = imported->get_shape_properties(entry.ref);
+            check(property(properties, "length") > 0, "imported STEP exact edge properties");
+            auto closest = imported->get_closest_points(entry.ref, *imported, entry.ref);
+            check(closest.distance < 1e-9, "imported STEP exact selection distance");
+            measured = true;
+            break;
+        }
+    check(measured, "imported STEP edges have live selection references");
+    std::string meters(step.data.begin(), step.data.end());
+    const auto unit = meters.find("SI_UNIT(.MILLI.,.METRE.)");
+    check(unit != std::string::npos, "STEP source millimeter unit fixture");
+    meters.replace(unit, std::strlen("SI_UNIT(.MILLI.,.METRE.)"), "SI_UNIT($,.METRE.)");
+    auto metric = import_step({"meters.step", Bytes(meters.begin(), meters.end())});
+    check(std::abs(metric->diagnostics().volume / 24e9 - 1) < 1e-7,
+          "STEP source meters are normalized to millimeters");
+    auto face = BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(), gp_Dir(0, 0, 1)), 0, 2, 0, 3).Face();
+    auto sheet = import_step({"sheet.step", write_step(face, .01, true)});
+    check(sheet->diagnostics().faces == 1 && sheet->diagnostics().solids == 0 &&
+              !json(sheet->export_gltf())["meshes"].empty(),
+          "STEP viewer accepts an open surface without reconstructing a solid");
+    BRep_Builder builder;
+    TopoDS_Compound assembly;
+    builder.MakeCompound(assembly);
+    builder.Add(assembly, BRepPrimAPI_MakeBox(2, 3, 4).Shape());
+    builder.Add(assembly, BRepPrimAPI_MakeBox(gp_Pnt(8, 0, 0), 2, 3, 4).Shape());
+    auto bodies = import_step({"assembly.step", write_step(assembly, .01, true)});
+    check(bodies->diagnostics().solids == 2 && bodies->diagnostics().faces == 12 &&
+              std::abs(bodies->diagnostics().volume - 48) < 1e-7 &&
+              !json(bodies->export_gltf())["meshes"].empty(),
+          "STEP viewer retains multiple placed bodies");
+    rejects([] { import_step({"empty.step", {}}); }, "empty STEP input must fail");
+    bool malformed = false;
+    try {
+        import_step({"bad.step", {'n', 'o', 't', ' ', 'S', 'T', 'E', 'P'}});
+    } catch (const std::runtime_error &) {
+        malformed = true;
+    }
+    check(malformed, "malformed STEP input must fail");
+}
 } // namespace
 int main(int argc, char **argv) {
     try {
         cube(argc > 1 ? argv[1] : nullptr, argc > 2 ? argv[2] : nullptr);
         placed();
         curves();
+        step_import();
         std::cout << "Model/export/query tests passed\n";
         return 0;
     } catch (const std::exception &error) {

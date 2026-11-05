@@ -3,6 +3,9 @@ import createStl2curves, { type ConversionOptions } from '../wasm/stl2curves.js'
 async function example(input: Uint8Array) {
   const module = await createStl2curves({ locateFile: (name, prefix) => prefix + name });
   const options: ConversionOptions = { accuracy: 0.1, tolerance: 0.01, trueSize: false };
+  const imported = module.importStep({ name: 'part.step', data: input });
+  module.exportGltf(imported.modelId);
+  module.releaseModel(imported.modelId);
   const result = module.convert([{ name: 'part.stl', data: input }], options);
   for (const model of result.models) {
     const step = module.exportStep(model.modelId);

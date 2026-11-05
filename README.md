@@ -94,6 +94,18 @@ production, configure the isolation headers described below to enable threads.
 Run `npm run test:app` to exercise the page against the hosted conversion library
 and Three.js from jsDelivr. This requires internet access.
 
+## STEP viewer
+
+`app/view.html` is a STEP/STP viewer with one file picker and a drop area. It uses
+the same library URLs and hover/measurement behavior as the converter, with a
+single full-width model view. Both pages share `app/workspace.css`.
+The viewer requires WASM assets rebuilt with `importStep(input)`, which returns
+a retained `ModelInfo` for `exportGltf`, `getShapeProperties`, `getClosestPoints`,
+and `releaseModel`. Import preserves STEP topology, including open surfaces and
+multiple bodies, and normalizes source units to millimeters. Serve it at
+`http://127.0.0.1:8080/ordinary/app/view.html` or the corresponding `isolated` URL.
+After rebuilding, run `npm run test:view` against the local packaged assets.
+
 ## Browser loading
 
 `loader.mjs` fetches JavaScript and WASM, imports JavaScript through a blob URL,
@@ -175,9 +187,9 @@ are returned in `errors` with input/object names, code, and message.
 
 | Option      | Default | Meaning                                                 |
 | ----------- | ------- | ------------------------------------------------------- |
-| `tolerance` | `0.01`  | Sewing tolerance in millimeters                         |
+| `tolerance` | `0.01`  | Base sewing tolerance in mm; fitted patches use bounded adaptive sewing |
 | `accuracy`  | `0.1`   | Fitting accuracy in millimeters                         |
-| `timeLimit` | `600`   | Optional-refinement budget in seconds; `0` unlimited    |
+| `timeLimit` | `600`   | Budget for each of optional fitting and solid reconstruction, in seconds; `0` unlimited |
 | `simplify`  | `-1`    | Automatic; `0` disabled; positive values in millimeters |
 | `fuse`      | `true`  | Fuse reconstructed bodies and object parts              |
 | `curves`    | `true`  | Enable curved-surface recognition                       |

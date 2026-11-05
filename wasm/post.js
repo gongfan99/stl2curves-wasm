@@ -24,7 +24,7 @@ function stl2curvesGuard(name) {
     }
   };
 }
-['convert', 'exportStep', 'exportGltf', 'getClosestPoints', 'getShapeProperties', 'releaseModel'].forEach(stl2curvesGuard);
+['convert', 'importStep', 'exportStep', 'exportGltf', 'getClosestPoints', 'getShapeProperties', 'releaseModel'].forEach(stl2curvesGuard);
 Module['dispose'] = function () {
   if (stl2curvesDisposed) return;
   if (stl2curvesBusy) throw new Error('Terminate the application Worker to cancel an active model operation');

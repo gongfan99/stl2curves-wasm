@@ -43,7 +43,7 @@ endif()
 
 add_library(stl2curves_core STATIC
   cpp/numeric.cpp cpp/mesh.cpp cpp/read3mf.cpp cpp/detect.cpp
-  cpp/advanced.cpp cpp/build.cpp cpp/step.cpp cpp/converter.cpp cpp/model.cpp cpp/gltf.cpp)
+  cpp/advanced.cpp cpp/build.cpp cpp/step.cpp cpp/readstep.cpp cpp/converter.cpp cpp/model.cpp cpp/gltf.cpp)
 target_include_directories(stl2curves_core PUBLIC include PRIVATE cpp ${OpenCASCADE_INCLUDE_DIR})
 target_include_directories(stl2curves_core SYSTEM PRIVATE ${TINYGLTF_INCLUDE_DIR})
 target_link_libraries(stl2curves_core PUBLIC
