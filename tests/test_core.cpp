@@ -1,12 +1,15 @@
 #include "internal.hpp"
 #include "projection.hpp"
 #include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Builder.hxx>
 #include <Eigen/Geometry>
 #include <GProp_GProps.hxx>
 #include <Geom_SphericalSurface.hxx>
-#include <OSD_ThreadPool.hxx>
 #include <IFSelect_ReturnStatus.hxx>
+#include <OSD_ThreadPool.hxx>
 #include <STEPControl_Reader.hxx>
+#include <TopoDS_Compound.hxx>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -119,6 +122,10 @@ void test_mesh() {
     check(!c.diagnostics.repairs.empty(), "repair diagnostics");
     auto parts = split_bodies(m);
     check(parts.size() == 1, "connected body");
+    check(parts[0].triangles == m.triangles && parts[0].points.size() == m.points.size(),
+          "body splitting preserves the source's corner and triangle order");
+    for (unsigned i = 0; i < m.points.size(); ++i)
+        check(parts[0].points[i] == m.points[i], "body splitting retains ordered corner samples");
     check(symmetry_planes(m).size() >= 3, "mesh reflection symmetry");
     auto open = m;
     open.triangles.erase(open.triangles.begin() + 2, open.triangles.begin() + 4);
@@ -193,6 +200,32 @@ void test_numeric() {
     }
 #endif
 }
+void test_fusion_parity() {
+    auto a = BRepPrimAPI_MakeBox(1, 1, 1).Shape();
+    auto b = BRepPrimAPI_MakeBox(gp_Pnt(.5, 0, 0), 1, 1, 1).Shape();
+    Context ctx;
+    Diagnostics info;
+    auto joined = unite({a, b}, ctx, true);
+    check(inspect(joined, info) && info.solids == 1 && std::abs(info.volume - 1.5) < 1e-8,
+          "3MF part fusion accepts overlapping material");
+    auto separate = unite({a, b}, ctx, false);
+    check(inspect(separate, info) && info.solids == 2 && std::abs(info.volume - 2) < 1e-8,
+          "a material-losing join preserves the checked STL groups");
+    TopoDS_Compound group;
+    BRep_Builder builder;
+    builder.MakeCompound(group);
+    builder.Add(group, a);
+    builder.Add(group, b);
+    auto overlapping_shells = unite({group}, ctx, false);
+    check(inspect(overlapping_shells, info) && info.solids == 1 &&
+              std::abs(info.volume - 1.5) < 1e-8,
+          "overlapping shells inside one group fuse before the final group join");
+    ctx.options.tolerance = .5;
+    auto distant = BRepPrimAPI_MakeBox(gp_Pnt(1.1, 0, 0), 1, 1, 1).Shape();
+    auto gap = unite({a, distant}, ctx, false);
+    check(inspect(gap, info) && info.solids == 2 && std::abs(info.volume - 2) < 1e-8,
+          "boolean fuzz remains 1e-5 independently of the sewing tolerance");
+}
 void test_projection() {
     Vec normal = Vec(1, 2, 3).normalized(), e = normal.unitOrthogonal(), f = normal.cross(e),
         offset(20, -17, 8);
@@ -258,6 +291,56 @@ void test_surfaces() {
     check(!smooth.empty(), "freeform fitting");
     for (const auto &p : smooth)
         check(!p.surface.IsNull() && p.deviation <= .002, "freeform fitting tolerance");
+}
+void test_known_axis_cone(bool rotated) {
+    // A small tapered continuation shares an axis with a well-supported
+    // cylinder. Its facet normals alone are insufficient evidence for a local
+    // cone, but the established axis determines its radial profile exactly.
+    Mesh mesh;
+    constexpr unsigned n = 32, segments = 12;
+    constexpr double pi = 3.14159265358979323846;
+    const Eigen::AngleAxisd rotation(rotated ? .73 : 0., Vec(1, 2, 3).normalized());
+    auto point = [&](double x, double y, double z) -> Vec {
+        return rotation * Vec(x, y, z) + Vec(4, -7, 11);
+    };
+    for (unsigned layer = 0; layer < 3; ++layer)
+        for (unsigned i = 0; i < n; ++i) {
+            double angle = 2 * pi * i / n;
+            mesh.points.push_back(point(std::cos(angle), std::sin(angle), layer));
+        }
+    for (unsigned layer = 0; layer < 2; ++layer)
+        for (unsigned i = 0; i < n; ++i) {
+            unsigned j = (i + 1) % n, a = layer * n;
+            mesh.triangles.push_back({a + i, a + j, a + n + j});
+            mesh.triangles.push_back({a + i, a + n + j, a + n + i});
+        }
+    unsigned begin = unsigned(mesh.points.size());
+    for (unsigned i = 0; i <= segments; ++i) {
+        double angle = 2 * pi * i / n;
+        mesh.points.push_back(point(1.25 * std::cos(angle), 1.25 * std::sin(angle), 3));
+    }
+    for (unsigned i = 0; i < segments; ++i) {
+        unsigned a = 2 * n + i, b = a + 1, c = begin + i + 1, d = begin + i;
+        mesh.triangles.push_back({a, b, c});
+        mesh.triangles.push_back({a, c, d});
+    }
+    Context context;
+    auto patches = detect(mesh, context);
+    unsigned cones = 0, cylinders = 0;
+    for (const auto &p : patches) {
+        if (p.kind == "cylinder") {
+            ++cylinders;
+            check(p.triangles.size() == 4 * n && std::abs(p.radius - 1) < 1e-6,
+                  "known-axis recovery must preserve the cylinder");
+        }
+        if (p.kind == "cone") {
+            ++cones;
+            check(p.triangles.size() == 2 * segments &&
+                      std::abs(std::abs(p.secondary) - .25) < 1e-6,
+                  "known-axis cone must recover the exact small tapered region");
+        }
+    }
+    check(cylinders == 1 && cones == 1, "small coaxial cone must retain its analytic surface");
 }
 void test_closed_surfaces() {
     auto mesh = cube();
@@ -476,8 +559,11 @@ int main() {
     try {
         test_mesh();
         test_numeric();
+        test_fusion_parity();
         test_projection();
         test_surfaces();
+        test_known_axis_cone(false);
+        test_known_axis_cone(true);
         test_closed_surfaces();
         test_3mf();
         test_conversion();

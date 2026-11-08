@@ -1,9 +1,11 @@
+#include "feature_facets.hpp"
 #include "internal.hpp"
 #include "projection.hpp"
 #include <Eigen/Cholesky>
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
 #include <Eigen/QR>
+#include <Eigen/SVD>
 #include <Eigen/Sparse>
 #include <Eigen/SparseCholesky>
 #include <Eigen/SparseLU>
@@ -63,6 +65,36 @@ struct Basis {
         }
         a.resize(count);
         return a;
+    }
+    std::vector<double> derivative(double t) const {
+        // Differentiate the cubic basis from its quadratic basis values.
+        // At the upper endpoint use the interior limit of the clamped spline.
+        t = std::clamp(t, 0., std::nextafter(1., 0.));
+        std::vector<double> a(count + 3, 0), b(count + 3, 0);
+        for (unsigned i = 0; i < count + 3; ++i)
+            if (t >= knots[i] && t < knots[i + 1])
+                a[i] = 1;
+        for (unsigned degree = 1; degree <= 2; ++degree) {
+            std::fill(b.begin(), b.end(), 0);
+            for (unsigned i = 0; i < count + 3 - degree; ++i) {
+                double left = knots[i + degree] - knots[i],
+                       right = knots[i + degree + 1] - knots[i + 1];
+                if (left > 0)
+                    b[i] += (t - knots[i]) * a[i] / left;
+                if (right > 0)
+                    b[i] += (knots[i + degree + 1] - t) * a[i + 1] / right;
+            }
+            a.swap(b);
+        }
+        std::vector<double> result(count, 0);
+        for (unsigned i = 0; i < count; ++i) {
+            double left = knots[i + 3] - knots[i], right = knots[i + 4] - knots[i + 1];
+            if (left > 0)
+                result[i] += 3 * a[i] / left;
+            if (right > 0)
+                result[i] -= 3 * a[i + 1] / right;
+        }
+        return result;
     }
     double greville(unsigned i) const { return (knots[i + 1] + knots[i + 2] + knots[i + 3]) / 3; }
 };
@@ -152,23 +184,34 @@ bool validate(Patch &patch, const Mesh &mesh, const Topology &top, double tolera
 // P-spline height-field fitting follows upstream freeform.py: weighted rim
 // corners, weak facet samples, and a full bending/twist penalty.
 Patch height_field(const Mesh &mesh, const Topology &top, const std::vector<unsigned> &triangles,
-                   double tolerance, Context &ctx) {
+                   double tolerance, Context &ctx, const FeatureFacets *facets = nullptr,
+                   const std::vector<unsigned> &facet_ids = {}) {
     Patch result;
     result.kind = "freeform";
+    result.trimmed = true;
     result.triangles = triangles;
     auto ids = vertices(mesh, triangles);
     Vec center = Vec::Zero(), normal = Vec::Zero();
     for (auto v : ids)
         center += mesh.points[v];
     center /= double(ids.size());
-    for (auto t : triangles)
-        normal += top.areas[t] * top.normals[t];
+    if (facets)
+        for (auto id : facet_ids)
+            normal += facets->areas[id] * facets->normals[id];
+    else
+        for (auto t : triangles)
+            normal += top.areas[t] * top.normals[t];
     if (normal.norm() < 1e-12)
         return {};
     normal.normalize();
-    for (auto t : triangles)
-        if (top.normals[t].dot(normal) < .25881904510252074)
-            return {};
+    if (facets) {
+        for (auto id : facet_ids)
+            if (facets->normals[id].dot(normal) <= .25881904510252074)
+                return {};
+    } else
+        for (auto t : triangles)
+            if (top.normals[t].dot(normal) < .25881904510252074)
+                return {};
     Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
     for (auto v : ids) {
         Vec q = mesh.points[v] - center;
@@ -177,6 +220,14 @@ Patch height_field(const Mesh &mesh, const Topology &top, const std::vector<unsi
     }
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigen(covariance);
     Vec e = eigen.eigenvectors().col(2);
+    if (facets) {
+        Eigen::MatrixXd projected(ids.size(), 3);
+        for (unsigned i = 0; i < ids.size(); ++i) {
+            Vec q = mesh.points[ids[i]] - center;
+            projected.row(i) = q - q.dot(normal) * normal;
+        }
+        e = projected.jacobiSvd(Eigen::ComputeThinV).matrixV().col(0);
+    }
     e -= e.dot(normal) * normal;
     e.normalize();
     Vec f = normal.cross(e);
@@ -237,16 +288,28 @@ Patch height_field(const Mesh &mesh, const Topology &top, const std::vector<unsi
         std::vector<double> weights;
         for (auto is_rim : rim)
             weights.push_back(is_rim ? 10. : 1.);
+        std::vector<std::pair<unsigned, unsigned>> sampling;
         for (auto ti : triangles) {
             auto t = mesh.triangles[ti];
+            double length = std::max({(mesh.points[t[0]] - mesh.points[t[1]]).norm(),
+                                      (mesh.points[t[1]] - mesh.points[t[2]]).norm(),
+                                      (mesh.points[t[2]] - mesh.points[t[0]]).norm()});
+            sampling.emplace_back(std::clamp(unsigned(std::ceil(2 * length / step)), 2u, 16u), ti);
+        }
+        if (facets)
+            std::stable_sort(sampling.begin(), sampling.end(),
+                             [](const auto &a, const auto &b) { return a.first < b.first; });
+        for (const auto &[n, ti] : sampling) {
+            auto t = mesh.triangles[ti];
             Vec a = mesh.points[t[0]], b = mesh.points[t[1]], c = mesh.points[t[2]];
-            double length = std::max({(a - b).norm(), (b - c).norm(), (c - a).norm()});
-            unsigned n = std::clamp(unsigned(std::ceil(2 * length / step)), 2u, 16u);
             for (unsigned i = 0; i <= n; ++i)
                 for (unsigned j = 0; j + i <= n; ++j)
                     if (i < n && j < n && i + j > 0) {
                         samples.push_back(local(
-                            (double(i) * a + double(j) * b + double(n - i - j) * c) / double(n)));
+                            facets ? Vec((double(i) / n) * a + (double(j) / n) * b +
+                                         (double(n - i - j) / n) * c)
+                                   : Vec((double(i) * a + double(j) * b + double(n - i - j) * c) /
+                                         double(n))));
                         weights.push_back(.01);
                     }
         }
@@ -300,19 +363,29 @@ Patch height_field(const Mesh &mesh, const Topology &top, const std::vector<unsi
         if (solve.info() == Eigen::Success) {
             Eigen::VectorXd coefficients = solve.solve(A.transpose() * heights);
             if (coefficients.allFinite()) {
-                auto height = [&](const Vec &p) {
-                    auto u = bu.at((p.x() - ulo) / uspan), v = bv.at((p.y() - vlo) / vspan);
-                    double h = 0;
+                auto value_gradient = [&](const Vec &p) -> Vec {
+                    auto u = bu.at((p.x() - ulo) / uspan), v = bv.at((p.y() - vlo) / vspan),
+                         du = bu.derivative((p.x() - ulo) / uspan),
+                         dv = bv.derivative((p.y() - vlo) / vspan);
+                    Vec value = Vec::Zero();
                     for (unsigned i = 0; i < mu; ++i)
-                        if (u[i])
+                        if (u[i] || du[i])
                             for (unsigned j = 0; j < mv; ++j)
-                                if (v[j])
-                                    h += u[i] * v[j] * coefficients[i * mv + j];
-                    return h;
+                                if (v[j] || dv[j]) {
+                                    double c = coefficients[i * mv + j];
+                                    value += c * Vec(u[i] * v[j], du[i] * v[j] / uspan,
+                                                     u[i] * dv[j] / vspan);
+                                }
+                    return value;
                 };
-                double deviation = 0;
-                for (const auto &p : corners)
-                    deviation = std::max(deviation, std::abs(height(p) - p.z()));
+                auto height = [&](const Vec &p) { return value_gradient(p).x(); };
+                double deviation = 0, rim_deviation = 0;
+                for (unsigned i = 0; i < corners.size(); ++i) {
+                    double gap = std::abs(height(corners[i]) - corners[i].z());
+                    deviation = std::max(deviation, gap);
+                    if (rim[i])
+                        rim_deviation = std::max(rim_deviation, gap);
+                }
                 bool hugs = deviation <= tolerance;
                 if (hugs)
                     for (auto ti : triangles) {
@@ -326,7 +399,10 @@ Patch height_field(const Mesh &mesh, const Topology &top, const std::vector<unsi
                             length = std::max(
                                 length, (mesh.points[t[k]] - mesh.points[t[(k + 1) % 3]]).norm());
                         }
-                        double allowed = length * theta / 4 + 3.5 * tolerance;
+                        // Python _hugs uses BULGE_MM + FIT_DEV at the requested
+                        // accuracy, independently of a stricter corner-fit trial.
+                        double allowed =
+                            length * theta / 4 + .35 * std::min(.1, ctx.options.accuracy);
                         for (unsigned k = 0; k < 4; ++k) {
                             Vec point =
                                 k == 3 ? Vec((mesh.points[t[0]] + mesh.points[t[1]] +
@@ -334,7 +410,12 @@ Patch height_field(const Mesh &mesh, const Topology &top, const std::vector<unsi
                                              3)
                                        : Vec((mesh.points[t[k]] + mesh.points[t[(k + 1) % 3]]) / 2);
                             auto p = local(point);
-                            if (std::abs(height(p) - p.z()) > allowed)
+                            auto value = value_gradient(p);
+                            // Freeform.signed() normalizes by the implicit
+                            // gradient; vertical error overstates steep slopes.
+                            if (std::abs(value.x() - p.z()) /
+                                    std::sqrt(1 + value.y() * value.y() + value.z() * value.z()) >
+                                allowed)
                                 hugs = false;
                         }
                         if (!hugs)
@@ -351,17 +432,20 @@ Patch height_field(const Mesh &mesh, const Topology &top, const std::vector<unsi
                     RealArray uk(1, intervals_u + 1), vk(1, intervals_v + 1);
                     IntArray um(1, intervals_u + 1), vm(1, intervals_v + 1);
                     for (unsigned i = 0; i <= intervals_u; ++i) {
-                        uk.SetValue(i + 1, double(i) / intervals_u);
+                        uk.SetValue(i + 1, facets ? ulo + uspan * i / intervals_u
+                                                  : double(i) / intervals_u);
                         um.SetValue(i + 1, i == 0 || i == intervals_u ? 4 : 1);
                     }
                     for (unsigned j = 0; j <= intervals_v; ++j) {
-                        vk.SetValue(j + 1, double(j) / intervals_v);
+                        vk.SetValue(j + 1, facets ? vlo + vspan * j / intervals_v
+                                                  : double(j) / intervals_v);
                         vm.SetValue(j + 1, j == 0 || j == intervals_v ? 4 : 1);
                     }
                     result.surface = new Geom_BSplineSurface(poles, uk, vk, um, vm, 3, 3);
                     result.origin = center;
                     result.axis = normal;
                     result.deviation = deviation;
+                    result.rim_deviation = rim_deviation;
                     return result;
                 }
             }
@@ -737,6 +821,15 @@ Patch thread(const Mesh &mesh, const Topology &top, const std::vector<unsigned> 
     return {};
 }
 } // namespace
+Patch reference_freeform_patch(const Mesh &mesh, const Topology &top,
+                               const std::vector<unsigned> &facet_ids, Context &context) {
+    FeatureFacets facets(mesh, top);
+    std::vector<unsigned> triangles;
+    for (auto id : facet_ids)
+        triangles.insert(triangles.end(), facets.triangles[id].begin(), facets.triangles[id].end());
+    return height_field(mesh, top, triangles, std::min(.01, .1 * context.options.accuracy), context,
+                        &facets, facet_ids);
+}
 Patch thread_patch(const Mesh &mesh, const Topology &top, const std::vector<unsigned> &triangles,
                    const Vec &axis, double tolerance) {
     try {
@@ -802,13 +895,62 @@ std::vector<Patch> advanced_patches(const Mesh &mesh, const Topology &top,
             if (!covered[t])
                 missing += top.areas[t];
         }
-        // As in Python's area-based candidate comparison, an equally complete
-        // precise reconstruction takes precedence over a looser approximation.
-        if (missing <= .01 * total)
+        bool complete = missing <= .01 * total;
+        // Keep an already precise single patch, and never replace exact or
+        // swept children just to remove a boundary. For multiple height fields,
+        // Python's preference for a light whole surface is still useful: a fit
+        // at the requested accuracy must use fewer poles than all its pieces.
+        if (complete && out.size() - first < 2)
             return;
+        std::size_t fine_poles = 0;
+        if (complete)
+            for (std::size_t i = first; i < out.size(); ++i) {
+                if (out[i].kind != "freeform")
+                    return;
+                auto spline = Handle(Geom_BSplineSurface)::DownCast(out[i].surface);
+                if (spline.IsNull())
+                    return;
+                fine_poles += spline->NbUPoles() * spline->NbVPoles();
+            }
         try {
             auto p = height_field(mesh, top, ids, freeform_tolerance, ctx);
             if (!p.surface.IsNull()) {
+                auto coarse = Handle(Geom_BSplineSurface)::DownCast(p.surface);
+                if (complete && (coarse.IsNull() || std::size_t(coarse->NbUPoles()) *
+                                                            std::size_t(coarse->NbVPoles()) >=
+                                                        fine_poles))
+                    return;
+                if (complete) {
+                    // A smaller fit must also preserve the already reconstructed
+                    // interior, within the same bulge budget as mesh fitting.
+                    // Corner residuals alone miss changes between sparse samples.
+                    PointProjector merged(p.surface);
+                    const double limit = .35 * std::min(.1, ctx.options.accuracy);
+                    for (std::size_t i = first; i < out.size(); ++i) {
+                        PointProjector previous(out[i].surface);
+                        const auto &triangles = out[i].triangles;
+                        std::size_t stride = std::max<std::size_t>(1, triangles.size() / 64);
+                        for (std::size_t j = 0; j < triangles.size(); j += stride) {
+                            if (ctx.expired())
+                                return;
+                            auto t = triangles[j];
+                            auto tri = mesh.triangles[t];
+                            std::array<Vec, 4> probes{top.centers[t]};
+                            for (unsigned k = 0; k < 3; ++k)
+                                probes[k + 1] =
+                                    (mesh.points[tri[k]] + mesh.points[tri[(k + 1) % 3]]) * .5;
+                            for (const auto &probe : probes) {
+                                const auto &old = previous.perform(probe);
+                                if (!old.NbPoints())
+                                    return;
+                                auto q = old.NearestPoint();
+                                const auto &distance = merged.perform(Vec(q.X(), q.Y(), q.Z()));
+                                if (!distance.NbPoints() || distance.LowerDistance() > limit)
+                                    return;
+                            }
+                        }
+                    }
+                }
                 for (std::size_t i = first; i < out.size(); ++i)
                     for (auto t : out[i].triangles)
                         covered[t] = false;
@@ -890,10 +1032,12 @@ std::vector<Patch> advanced_patches(const Mesh &mesh, const Topology &top,
                     fit_region(piece, depth);
                 return;
             }
-            // First retain the precise fits used by the CAD regressions.
-            // Split a region that cannot fit them before resorting to a
-            // looser whole-region fit for genuinely unexplained mesh areas.
-            p = height_field(mesh, top, ids, std::min(.001, freeform_tolerance), ctx);
+            // freeform.fit() stops at the first surface meeting the requested
+            // accuracy. Starting at a stricter corner tolerance over-refines
+            // smooth regions and adds unnecessary edges between fitted pieces.
+            p = height_field(mesh, top, ids, freeform_tolerance, ctx);
+            if (p.surface.IsNull() && !ctx.expired())
+                p = height_field(mesh, top, ids, std::min(.001, freeform_tolerance), ctx);
             if (p.surface.IsNull() && freeform_tolerance > .001 && !ctx.expired())
                 p = height_field(mesh, top, ids, std::min(.002, freeform_tolerance), ctx);
             if (!p.surface.IsNull()) {

@@ -12,13 +12,42 @@ int main(int argc, char **argv) {
     struct Case {
         const char *name;
         double volume, error;
-        unsigned faces;
+        unsigned faces, solids;
+        std::map<std::string, std::size_t> surfaces;
     };
     const Case cases[] = {
-        {"test_fine.stl", 34615.8107, .01, 29},   {"test_coarse.stl", 34615.8107, .01, 29},
-        {"test_hard.stl", 35134.2571, .05, 31},   {"test_lid.stl", 57600.4078, .05, 45},
-        {"test_sphere.stl", 34303.804, .01, 34},  {"test_corners.stl", 32796.5606, .1, 30},
-        {"test_corners2.stl", 14072.0767, .1, 34}};
+        {"test_fine.stl", 34615.8107, .01, 29, 1, {{"plane", 17}, {"cylinder", 12}}},
+        {"test_coarse.stl", 34615.8107, .01, 29, 1, {{"plane", 17}, {"cylinder", 12}}},
+        {"test_hard.stl",
+         35134.2571,
+         .05,
+         31,
+         1,
+         {{"plane", 16}, {"cylinder", 11}, {"cone", 3}, {"torus", 1}}},
+        {"test_lid.stl",
+         57600.4078,
+         .05,
+         45,
+         1,
+         {{"plane", 15}, {"cylinder", 17}, {"cone", 5}, {"torus", 8}}},
+        {"test_sphere.stl",
+         34303.804,
+         .01,
+         34,
+         2,
+         {{"plane", 6}, {"cylinder", 14}, {"sphere", 14}}},
+        {"test_corners.stl",
+         32796.5606,
+         .1,
+         26,
+         1,
+         {{"plane", 6}, {"cylinder", 12}, {"torus", 4}, {"bspline", 4}}},
+        {"test_corners2.stl",
+         14072.0767,
+         .1,
+         30,
+         1,
+         {{"plane", 10}, {"cylinder", 12}, {"torus", 4}, {"bspline", 4}}}};
     unsigned failures = 0, examined = 0;
     Options options;
     options.fuse = false;
@@ -46,9 +75,12 @@ int main(int argc, char **argv) {
         }
         auto exported = result.models[0]->export_step();
         const auto &d = exported.diagnostics;
-        bool ok = d.valid && std::abs(d.volume - c.volume) <= c.error && d.faces <= c.faces;
+        // Face/solid/surface counts are actual Python oracle outputs, not the
+        // original permissive face caps. Keep the CAD design's volume checks.
+        bool ok = d.valid && std::abs(d.volume - c.volume) <= c.error && d.faces == c.faces &&
+                  d.solids == c.solids && d.surface_counts == c.surfaces;
         std::cout << (ok ? "PASS " : "FAIL ") << c.name << " volume error " << d.volume - c.volume
-                  << " faces " << d.faces << " max " << c.faces << " fallback " << d.fallback
+                  << " faces " << d.faces << " expected " << c.faces << " fallback " << d.fallback
                   << '\n';
         failures += !ok;
         try {

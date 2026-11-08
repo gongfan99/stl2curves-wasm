@@ -1,15 +1,23 @@
 // Surface recognition and robust fitting derived from the stl2curves pipeline.
+#include "feature_corner.hpp"
+#include "feature_fillets.hpp"
+#include "feature_islands.hpp"
 #include "internal.hpp"
 #include "projection.hpp"
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
 #include <Eigen/QR>
+#include <GC_MakeArcOfCircle.hxx>
 #include <Geom_ConicalSurface.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_SphericalSurface.hxx>
 #include <Geom_ToroidalSurface.hxx>
 #include <gp_Ax3.hxx>
+#include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 #include <numeric>
@@ -129,6 +137,11 @@ std::vector<Patch> fits(const Mesh &m, const Topology &top, const std::vector<un
     if (ids.size() < 4)
         return {};
     Vec center = mean(m, ids);
+    // The initial smooth-island proposal may optimize a whole cone, as in
+    // Python _whole_region/_tube_fit. Local seeds retain the normal-derived
+    // axis used by _cone; optimizing those seeds invents cones on two-ring
+    // strips of otherwise spherical supports.
+    const bool whole_region = tori && triangles.size() > 24;
     std::vector<Patch> candidates;
     candidates.push_back(fit_plane(m, triangles));
     Eigen::MatrixXd A(ids.size(), 4);
@@ -147,57 +160,59 @@ std::vector<Patch> fits(const Mesh &m, const Topology &top, const std::vector<un
         p.triangles = triangles;
         candidates.push_back(p);
     }
-    // The planar facets of a tessellated cone meet at its apex. Solving for that
-    // apex first avoids the biased circle initialization of a short countersink.
-    Eigen::MatrixXd planes(triangles.size(), 3);
-    Eigen::VectorXd offsets(triangles.size());
-    for (unsigned i = 0; i < triangles.size(); ++i) {
-        planes.row(i) = top.normals[triangles[i]].transpose();
-        offsets[i] = top.normals[triangles[i]].dot(top.centers[triangles[i]] - center);
-    }
-    auto apex_solver = planes.colPivHouseholderQr();
-    if (apex_solver.rank() == 3) {
-        Vec relative = apex_solver.solve(offsets);
-        double extent = 0;
-        for (auto i : ids)
-            extent = std::max(extent, (m.points[i] - center).norm());
-        if (relative.allFinite() && relative.norm() < std::max(1.0, extent) * 1e5 &&
-            (planes * relative - offsets).cwiseAbs().maxCoeff() < 1e-4) {
-            Vec apex = center + relative, average = Vec::Zero();
-            std::vector<Vec> rays;
-            for (auto i : ids) {
-                Vec ray = m.points[i] - apex;
-                if (ray.norm() > 1e-8 * std::max(1.0, extent)) {
-                    ray.normalize();
-                    rays.push_back(ray);
-                    average += ray;
+    if (whole_region) {
+        // The planar facets of a tessellated cone meet at its apex. Solving for that
+        // apex first avoids the biased circle initialization of a short countersink.
+        Eigen::MatrixXd planes(triangles.size(), 3);
+        Eigen::VectorXd offsets(triangles.size());
+        for (unsigned i = 0; i < triangles.size(); ++i) {
+            planes.row(i) = top.normals[triangles[i]].transpose();
+            offsets[i] = top.normals[triangles[i]].dot(top.centers[triangles[i]] - center);
+        }
+        auto apex_solver = planes.colPivHouseholderQr();
+        if (apex_solver.rank() == 3) {
+            Vec relative = apex_solver.solve(offsets);
+            double extent = 0;
+            for (auto i : ids)
+                extent = std::max(extent, (m.points[i] - center).norm());
+            if (relative.allFinite() && relative.norm() < std::max(1.0, extent) * 1e5 &&
+                (planes * relative - offsets).cwiseAbs().maxCoeff() < 1e-4) {
+                Vec apex = center + relative, average = Vec::Zero();
+                std::vector<Vec> rays;
+                for (auto i : ids) {
+                    Vec ray = m.points[i] - apex;
+                    if (ray.norm() > 1e-8 * std::max(1.0, extent)) {
+                        ray.normalize();
+                        rays.push_back(ray);
+                        average += ray;
+                    }
                 }
-            }
-            if (rays.size() >= 3) {
-                average /= double(rays.size());
-                Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
-                for (const auto &ray : rays) {
-                    Vec q = ray - average;
-                    covariance += q * q.transpose();
-                }
-                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigen(covariance);
-                Vec axis = eigen.eigenvectors().col(0);
-                if (axis.dot(average) < 0)
-                    axis = -axis;
-                double cosine = axis.dot(average);
-                if (eigen.eigenvalues()[1] > 1e-12 * eigen.eigenvalues()[2] && cosine > 0.01 &&
-                    cosine < 1 - 1e-10) {
-                    double slope = std::sqrt(1 - cosine * cosine) / cosine,
-                           z = (center - apex).dot(axis);
-                    Patch p;
-                    p.kind = "cone";
-                    p.origin = apex + z * axis;
-                    p.axis = axis;
-                    p.radius = z * slope;
-                    p.secondary = slope;
-                    p.triangles = triangles;
-                    if (p.radius > 1e-6)
-                        candidates.push_back(p);
+                if (rays.size() >= 3) {
+                    average /= double(rays.size());
+                    Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+                    for (const auto &ray : rays) {
+                        Vec q = ray - average;
+                        covariance += q * q.transpose();
+                    }
+                    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigen(covariance);
+                    Vec axis = eigen.eigenvectors().col(0);
+                    if (axis.dot(average) < 0)
+                        axis = -axis;
+                    double cosine = axis.dot(average);
+                    if (eigen.eigenvalues()[1] > 1e-12 * eigen.eigenvalues()[2] && cosine > 0.01 &&
+                        cosine < 1 - 1e-10) {
+                        double slope = std::sqrt(1 - cosine * cosine) / cosine,
+                               z = (center - apex).dot(axis);
+                        Patch p;
+                        p.kind = "cone";
+                        p.origin = apex + z * axis;
+                        p.axis = axis;
+                        p.radius = z * slope;
+                        p.secondary = slope;
+                        p.triangles = triangles;
+                        if (p.radius > 1e-6)
+                            candidates.push_back(p);
+                    }
                 }
             }
         }
@@ -261,40 +276,77 @@ std::vector<Patch> fits(const Mesh &m, const Topology &top, const std::vector<un
             p.radius = solution.x[4];
             candidates.push_back(p);
         }
-        // Cone fit uses the normal-space plane for its axis and a robust radial profile.
-        p.kind = "cone";
-        p.axis = axis;
-        p.origin = center + circle[0] * e + circle[1] * f;
-        Eigen::MatrixXd Z(ids.size(), 2);
-        Eigen::VectorXd R(ids.size());
-        for (unsigned i = 0; i < ids.size(); ++i) {
-            Vec q = m.points[ids[i]] - p.origin;
-            double z = q.dot(axis);
-            Z.row(i) << 1, z;
-            R[i] = (q - z * axis).norm();
-        }
-        Eigen::Vector2d profile = Z.colPivHouseholderQr().solve(R);
-        if (profile[0] > 0 && std::abs(profile[1]) > 1e-5 && std::abs(profile[1]) < 100) {
-            Eigen::VectorXd x(6);
-            x << circle[0], circle[1], 0, 0, profile[0], profile[1];
-            auto coneResidual = [&](const Eigen::VectorXd &v) -> Eigen::VectorXd {
-                Vec a = (axis + v[2] * e + v[3] * f).normalized(),
-                    origin = center + v[0] * e + v[1] * f;
-                Eigen::VectorXd r(ids.size());
-                for (unsigned i = 0; i < ids.size(); ++i) {
-                    Vec q = m.points[ids[i]] - origin;
-                    double z = q.dot(a);
-                    r[i] = ((q - z * a).norm() - v[4] - z * v[5]) / std::sqrt(1 + v[5] * v[5]);
+        if (whole_region) {
+            // Cone fit uses the normal-space plane for its axis and a robust radial profile.
+            p.kind = "cone";
+            p.axis = axis;
+            p.origin = center + circle[0] * e + circle[1] * f;
+            Eigen::MatrixXd Z(ids.size(), 2);
+            Eigen::VectorXd R(ids.size());
+            for (unsigned i = 0; i < ids.size(); ++i) {
+                Vec q = m.points[ids[i]] - p.origin;
+                double z = q.dot(axis);
+                Z.row(i) << 1, z;
+                R[i] = (q - z * axis).norm();
+            }
+            Eigen::Vector2d profile = Z.colPivHouseholderQr().solve(R);
+            if (profile[0] > 0 && std::abs(profile[1]) > 1e-5 && std::abs(profile[1]) < 100) {
+                Eigen::VectorXd x(6);
+                x << circle[0], circle[1], 0, 0, profile[0], profile[1];
+                auto coneResidual = [&](const Eigen::VectorXd &v) -> Eigen::VectorXd {
+                    Vec a = (axis + v[2] * e + v[3] * f).normalized(),
+                        origin = center + v[0] * e + v[1] * f;
+                    Eigen::VectorXd r(ids.size());
+                    for (unsigned i = 0; i < ids.size(); ++i) {
+                        Vec q = m.points[ids[i]] - origin;
+                        double z = q.dot(a);
+                        r[i] = ((q - z * a).norm() - v[4] - z * v[5]) / std::sqrt(1 + v[5] * v[5]);
+                    }
+                    return r;
+                };
+                auto fit = least_squares(coneResidual, x, 50);
+                if (fit.x.allFinite() && fit.x[4] > 0) {
+                    p.origin = center + fit.x[0] * e + fit.x[1] * f;
+                    p.axis = (axis + fit.x[2] * e + fit.x[3] * f).normalized();
+                    p.radius = fit.x[4];
+                    p.secondary = fit.x[5];
+                    candidates.push_back(p);
                 }
-                return r;
-            };
-            auto fit = least_squares(coneResidual, x, 50);
-            if (fit.x.allFinite() && fit.x[4] > 0) {
-                p.origin = center + fit.x[0] * e + fit.x[1] * f;
-                p.axis = (axis + fit.x[2] * e + fit.x[3] * f).normalized();
-                p.radius = fit.x[4];
-                p.secondary = fit.x[5];
-                candidates.push_back(p);
+            }
+        } else {
+            // Reference _line_on_direction: solve the radial profile on the
+            // normal-derived axis before region growth, without apex fitting.
+            if (std::abs(axis.dot(coneEig.eigenvectors().col(0))) > .99999) {
+                Eigen::MatrixXd profile(ids.size(), 5);
+                Eigen::VectorXd rhs(ids.size());
+                for (unsigned i = 0; i < ids.size(); ++i) {
+                    double x = m.points[ids[i]].dot(e), y = m.points[ids[i]].dot(f),
+                           z = m.points[ids[i]].dot(axis);
+                    profile.row(i) << 2 * x, 2 * y, 1, z, z * z;
+                    rhs[i] = x * x + y * y;
+                }
+                Eigen::VectorXd coefficients = profile.completeOrthogonalDecomposition().solve(rhs);
+                Vec origin = coefficients[0] * e + coefficients[1] * f;
+                Eigen::MatrixXd z(ids.size(), 2);
+                Eigen::VectorXd rho(ids.size());
+                for (unsigned i = 0; i < ids.size(); ++i) {
+                    auto q = m.points[ids[i]] - origin;
+                    double h = q.dot(axis);
+                    z.row(i) << 1, h;
+                    rho[i] = (q - h * axis).norm();
+                }
+                Eigen::Vector2d line = z.colPivHouseholderQr().solve(rho);
+                double h = (center - origin).dot(axis), r = line[0] + h * line[1];
+                if (r > 0 && std::abs(line[1]) > 1e-5 && std::abs(line[1]) < 5.671281819617707) {
+                    Patch candidate;
+                    candidate.kind = "cone";
+                    candidate.axis = axis;
+                    candidate.origin = origin + h * axis;
+                    candidate.radius = r;
+                    candidate.secondary = line[1];
+                    candidate.triangles = triangles;
+                    candidates.push_back(candidate);
+                }
             }
         }
         if (tori && ids.size() >= 12) {
@@ -514,7 +566,8 @@ std::vector<Patch> rolling_fillets(const Mesh &mesh, const Topology &top,
     return out;
 }
 } // namespace
-std::vector<Patch> detect(const Mesh &m, Context &ctx) {
+#include "feature_reference.inc"
+static std::vector<Patch> legacy_analytic_patches(const Mesh &m, Context &ctx) {
     trace("analytic detection");
     const auto top = topology(m);
     const unsigned n = unsigned(m.triangles.size());
@@ -535,9 +588,9 @@ std::vector<Patch> detect(const Mesh &m, Context &ctx) {
         for (auto t : p.triangles)
             area += top.areas[t];
         if (p.kind == "sphere")
-            return p.triangles.size() >= 48 && area >= p.radius * p.radius;
-        if (p.kind == "cone")
             return p.triangles.size() >= 48 && area >= .2 * p.radius * p.radius;
+        if (p.kind == "cone")
+            return p.triangles.size() >= 24 && area >= .2 * p.radius * p.radius;
         if (p.kind == "cylinder")
             return p.triangles.size() >= 24 && area >= p.radius * p.radius;
         if (p.kind == "torus")
@@ -875,40 +928,8 @@ std::vector<Patch> detect(const Mesh &m, Context &ctx) {
             }
         }
     }
-    // A verified mesh symmetry can propose an independently checked patch on the
-    // opposite side. It never bypasses the point/normal acceptance tests.
-    if (ctx.options.curves) {
-        auto mirrors = symmetry_planes(m);
-        auto known = patches;
-        for (const auto &mirror : mirrors)
-            for (auto p : known)
-                if (p.kind != "plane") {
-                    const auto &n = mirror.first;
-                    p.origin -= 2 * (n.dot(p.origin) - mirror.second) * n;
-                    p.axis -= 2 * n.dot(p.axis) * n;
-                    std::vector<bool> on(owner.size(), false);
-                    for (unsigned i = 0; i < owner.size(); ++i)
-                        if (owner[i] < 0) {
-                            Patch one = p;
-                            if (holds(one, m, top, {i},
-                                      std::max(1e-4, std::min({0.002, ctx.options.accuracy * 0.02,
-                                                               2 * p.deviation + 1e-5}))))
-                                on[i] = true;
-                        }
-                    std::vector<std::vector<unsigned>> graph(owner.size());
-                    for (unsigned i = 0; i < on.size(); ++i)
-                        if (on[i])
-                            for (auto j : top.neighbors[i])
-                                if (on[j])
-                                    graph[i].push_back(j);
-                    for (auto ids : components(graph))
-                        if (ids.size() >= 6 && on[ids.front()]) {
-                            auto candidate = p;
-                            candidate.triangles = std::move(ids);
-                            add(candidate);
-                        }
-                }
-    }
+    // features.MIRROR is disabled in the Python reference. Keep symmetry
+    // discovery available to callers without adding a default recognition pass.
     // Remove only sub-weld noise before these supports constrain blend rims.
     for (auto &p : patches)
         if (p.kind == "cylinder" || p.kind == "sphere" || p.kind == "torus") {
@@ -959,6 +980,143 @@ std::vector<Patch> detect(const Mesh &m, Context &ctx) {
                     }
                 }
     }
+    // Reference _axis_patches: after direct recognition, explain remaining
+    // corners around already established axes, retaining the transverse center.
+    if (ctx.options.curves) {
+        std::vector<Patch> axes;
+        for (const auto &p : patches)
+            if (p.kind == "cylinder" || p.kind == "cone") {
+                bool duplicate = false;
+                for (const auto &q : axes) {
+                    Vec d = p.origin - q.origin;
+                    if (std::abs(p.axis.dot(q.axis)) > .999999 &&
+                        (d - d.dot(q.axis) * q.axis).norm() < 1e-4)
+                        duplicate = true;
+                }
+                if (!duplicate)
+                    axes.push_back(p);
+            }
+        for (const auto &axis : axes)
+            for (unsigned seed = 0; seed < n; ++seed) {
+                if (owner[seed] >= 0)
+                    continue;
+                std::vector<unsigned> local{seed};
+                for (auto j : top.neighbors[seed])
+                    if (owner[j] < 0)
+                        local.push_back(j);
+                auto ids = vertices(m, local);
+                Eigen::MatrixXd Z(ids.size(), 2);
+                Eigen::VectorXd R(ids.size());
+                double lo = 1e100, hi = -1e100;
+                for (unsigned i = 0; i < ids.size(); ++i) {
+                    Vec q = m.points[ids[i]] - axis.origin;
+                    double z = q.dot(axis.axis);
+                    Z.row(i) << 1, z;
+                    R[i] = (q - z * axis.axis).norm();
+                    lo = std::min(lo, z);
+                    hi = std::max(hi, z);
+                }
+                if (hi - lo < 1e-6)
+                    continue;
+                Eigen::Vector2d profile = Z.colPivHouseholderQr().solve(R);
+                if (!profile.allFinite() || std::abs(profile[1]) < 1e-4 ||
+                    std::abs(profile[1]) > 5.671281819617707)
+                    continue;
+                Patch p;
+                p.kind = "cone";
+                p.axis = axis.axis;
+                p.origin = axis.origin;
+                p.radius = profile[0];
+                p.secondary = profile[1];
+                // Use a positive radius at the local band's mean height.
+                double z = .5 * (lo + hi);
+                p.origin += z * p.axis;
+                p.radius += z * p.secondary;
+                if (p.radius <= 0)
+                    continue;
+                auto on = [&](unsigned t) {
+                    for (auto v : m.triangles[t])
+                        if (deviation(p, m.points[v]) > 1e-4)
+                            return false;
+                    return normal_agrees(p, top, t);
+                };
+                if (!on(seed))
+                    continue;
+                std::vector<unsigned> grown{seed};
+                std::set<unsigned> visited{seed};
+                for (unsigned i = 0; i < grown.size(); ++i)
+                    for (auto j : top.neighbors[grown[i]])
+                        if (owner[j] < 0 && visited.insert(j).second && on(j))
+                            grown.push_back(j);
+                if (grown.size() < 24)
+                    continue;
+                // Refit only the profile, as the reference's axis_fixed=True pass.
+                ids = vertices(m, grown);
+                Z.resize(ids.size(), 2);
+                R.resize(ids.size());
+                for (unsigned i = 0; i < ids.size(); ++i) {
+                    Vec q = m.points[ids[i]] - p.origin;
+                    double z = q.dot(p.axis);
+                    Z.row(i) << 1, z;
+                    R[i] = (q - z * p.axis).norm();
+                }
+                profile = Z.colPivHouseholderQr().solve(R);
+                p.radius = profile[0];
+                p.secondary = profile[1];
+                p.triangles = grown;
+                if (p.radius > 0 && holds(p, m, top, grown, 1e-4) && supported_region(p))
+                    add(std::move(p));
+            }
+    }
+
+    return patches;
+}
+std::vector<Patch> analytic_patches(const Mesh &m, Context &ctx) {
+    auto top = topology(m);
+    if (auto reference = reference_analysis(m, top, ctx))
+        return std::move(*reference);
+    return legacy_analytic_patches(m, ctx);
+}
+std::vector<Patch> finish_patches(const Mesh &m, std::vector<Patch> patches, Context &ctx) {
+    const auto top = topology(m);
+    if (reference_analysis(patches)) {
+        try {
+            if (auto reference = reference_finish(m, top, patches, ctx))
+                return std::move(*reference);
+        } catch (const Standard_Failure &) {
+            trace("reference transition surface unavailable");
+        }
+        // Intermediate reference profiles are lazy and may have no direct
+        // OCCT surface. An unsupported transition must restart recognition;
+        // it cannot feed those placeholders into the existing fitter.
+        patches = legacy_analytic_patches(m, ctx);
+        if (ctx.options.curves)
+            snap_patches(m, patches, ctx);
+    }
+    const unsigned n = unsigned(m.triangles.size());
+    std::vector<int> owner(n, -1);
+    std::vector<unsigned> bodies(n);
+    unsigned body = 0;
+    for (const auto &group : components(top.neighbors)) {
+        for (auto i : group)
+            bodies[i] = body;
+        ++body;
+    }
+    for (unsigned i = 0; i < patches.size(); ++i)
+        for (auto t : patches[i].triangles)
+            owner[t] = int(i);
+    auto add = [&](Patch p) {
+        surface(p);
+        p.body = bodies[p.triangles.front()];
+        for (auto t : p.triangles)
+            owner[t] = int(patches.size());
+        patches.push_back(std::move(p));
+    };
+    std::vector<std::vector<unsigned>> flat(n);
+    for (unsigned i = 0; i < n; ++i)
+        for (auto j : top.neighbors[i])
+            if (top.normals[i].dot(top.normals[j]) > 1 - 1e-7)
+                flat[i].push_back(j);
     // Optional reconstruction starts after complete analytic analysis.
     trace("advanced fitting");
     ctx.deadline = ctx.options.time_limit
@@ -987,6 +1145,28 @@ std::vector<Patch> detect(const Mesh &m, Context &ctx) {
             for (auto i : p.triangles)
                 eligible[i] = true;
     }
+    // Python blends.add_blends(): small planar facets remain available to
+    // smooth fitting. Do this after analytic recognition so a coarse cylinder
+    // or cone keeps its established support. First locking these facets to
+    // planes cuts a smooth region into artificial strips.
+    double largest_facet = 0;
+    for (const auto &group : components(flat)) {
+        double area = 0;
+        for (auto t : group)
+            area += top.areas[t];
+        largest_facet = std::max(largest_facet, area);
+    }
+    for (const auto &p : patches)
+        if (p.kind == "plane") {
+            double area = 0;
+            for (auto t : p.triangles)
+                area += top.areas[t];
+            if (area <= .02 * largest_facet)
+                for (auto t : p.triangles) {
+                    virtual_owner[t] = -1;
+                    eligible[t] = true;
+                }
+        }
     std::vector<std::vector<unsigned>> transition_graph(n);
     for (unsigned i = 0; i < n; ++i)
         if (eligible[i])
@@ -1045,6 +1225,12 @@ std::vector<Patch> detect(const Mesh &m, Context &ctx) {
         for (auto p : advanced)
             add(std::move(p));
     }
+    if (ctx.options.curves && ctx.options.blends)
+        absorb_feature_islands(m, top, patches, ctx.options.accuracy);
+    std::fill(owner.begin(), owner.end(), -1);
+    for (unsigned i = 0; i < patches.size(); ++i)
+        for (auto t : patches[i].triangles)
+            owner[t] = int(i);
     // Unrecognized facets remain exact planar geometry. They are never discarded.
     for (const auto &group : components(flat)) {
         std::vector<unsigned> left;
@@ -1059,108 +1245,6 @@ std::vector<Patch> detect(const Mesh &m, Context &ctx) {
         else
             for (auto i : left)
                 add(fit_plane(m, {i}));
-    }
-    // A very slender tessellation facet can have an unreliable normal even
-    // though its corners lie on an adjoining curved surface. Do not retain it
-    // as an independent planar face if a verified neighbor explains its points
-    // and preserves the orientation of the projected triangle.
-    unsigned absorbed = 0;
-    for (unsigned pi = 0; pi < patches.size(); ++pi) {
-        auto &p = patches[pi];
-        if (p.kind != "plane" || p.triangles.empty() || p.triangles.size() > 2)
-            continue;
-        double area = 0, longest = 0;
-        bool slender = true;
-        for (auto t : p.triangles) {
-            auto tri = m.triangles[t];
-            double length2 = 0;
-            for (unsigned k = 0; k < 3; ++k)
-                length2 = std::max(length2,
-                                   (m.points[tri[k]] - m.points[tri[(k + 1) % 3]]).squaredNorm());
-            area += top.areas[t];
-            longest = std::max(longest, std::sqrt(length2));
-            if (length2 <= 0 || 2 * top.areas[t] > .05 * length2)
-                slender = false;
-        }
-        if (!slender || area > 10 * ctx.options.accuracy * ctx.options.accuracy ||
-            longest > std::max(4 * ctx.options.accuracy, 10 * ctx.options.tolerance))
-            continue;
-        std::set<unsigned> neighbors;
-        for (auto t : p.triangles)
-            for (auto j : top.neighbors[t])
-                if (owner[j] >= 0 && unsigned(owner[j]) != pi && patches[owner[j]].kind != "plane")
-                    neighbors.insert(unsigned(owner[j]));
-        unsigned best = unsigned(patches.size());
-        double best_error = 1e100;
-        const double limit = std::max(1e-5, std::min(.002, ctx.options.accuracy * .02));
-        for (auto candidate : neighbors) {
-            const auto &support = patches[candidate];
-            PointProjector project(support.surface);
-            std::map<unsigned, Vec> projected;
-            double error = 0;
-            bool fits = true;
-            for (auto v : vertices(m, p.triangles)) {
-                const auto &q = project.perform(m.points[v]);
-                if (!q.NbPoints()) {
-                    fits = false;
-                    break;
-                }
-                error = std::max(error, q.LowerDistance());
-                auto at = q.NearestPoint();
-                projected.emplace(v, Vec(at.X(), at.Y(), at.Z()));
-            }
-            if (!fits || error > limit || error >= best_error)
-                continue;
-            for (auto t : p.triangles) {
-                auto tri = m.triangles[t];
-                Vec cross = (projected.at(tri[1]) - projected.at(tri[0]))
-                                .cross(projected.at(tri[2]) - projected.at(tri[0]));
-                if (cross.dot(top.normals[t]) <= std::max(1e-14, 2 * top.areas[t] * 1e-4)) {
-                    fits = false;
-                    break;
-                }
-                const auto &q = project.perform(top.centers[t]);
-                if (!q.NbPoints()) {
-                    fits = false;
-                    break;
-                }
-                double u, v;
-                q.LowerDistanceParameters(u, v);
-                gp_Pnt at;
-                gp_Vec du, dv;
-                support.surface->D1(u, v, at, du, dv);
-                auto normal = du.Crossed(dv);
-                Vec n(normal.X(), normal.Y(), normal.Z());
-                if (n.norm() < 1e-12 || std::abs(n.normalized().dot(top.normals[t])) > .72) {
-                    fits = false;
-                    break;
-                }
-            }
-            if (fits) {
-                best = candidate;
-                best_error = error;
-            }
-        }
-        if (best < patches.size()) {
-            auto &target = patches[best];
-            target.triangles.insert(target.triangles.end(), p.triangles.begin(), p.triangles.end());
-            target.deviation = std::max(target.deviation, best_error);
-            for (auto t : p.triangles)
-                owner[t] = int(best);
-            absorbed += unsigned(p.triangles.size());
-            p.triangles.clear();
-        }
-    }
-    if (absorbed) {
-        patches.erase(std::remove_if(patches.begin(), patches.end(),
-                                     [](const Patch &p) { return p.triangles.empty(); }),
-                      patches.end());
-        std::fill(owner.begin(), owner.end(), -1);
-        for (unsigned i = 0; i < patches.size(); ++i)
-            for (auto t : patches[i].triangles)
-                owner[t] = int(i);
-        ctx.diagnostics.repairs.push_back("Reconstructed " + std::to_string(absorbed) +
-                                          " slender transition facets on adjoining surfaces");
     }
     // Upstream _straight: remove insignificant taper after region growth.
     // Normalize only after recognition so cylinder/cone seed pruning keeps
@@ -1391,65 +1475,6 @@ std::vector<Patch> detect(const Mesh &m, Context &ctx) {
     }
     // Reclaim adjacent loose facets and short stand-in surfaces once a larger
     // exact support is known. Signed normal agreement preserves opposing caps.
-    // A short conical band can have only two vertex rings and is then also
-    // cospherical. Refit the complete band after merging the local seeds.
-    for (auto &p : merged)
-        if (p.kind == "sphere") {
-            double sphere_error = 0;
-            for (auto t : p.triangles)
-                sphere_error += 1 - std::abs(normal(p, top.centers[t]).dot(top.normals[t]));
-            auto candidates = fits(m, top, p.triangles, true);
-            auto ids = vertices(m, p.triangles);
-            // For two cospherical rings their sphere center lies on the cone axis.
-            // Use that center to avoid the biased circle fit of unequal-radius rings.
-            Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
-            Vec average = Vec::Zero();
-            for (auto t : p.triangles)
-                average += top.normals[t];
-            average /= double(p.triangles.size());
-            for (auto t : p.triangles) {
-                Vec d = top.normals[t] - average;
-                covariance += d * d.transpose();
-            }
-            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigen(covariance);
-            for (const Vec &axis : std::vector<Vec>{eigen.eigenvectors().col(0), Vec::UnitX(),
-                                                    Vec::UnitY(), Vec::UnitZ()}) {
-                Eigen::MatrixXd z(ids.size(), 2);
-                Eigen::VectorXd r(ids.size());
-                for (unsigned i = 0; i < ids.size(); ++i) {
-                    Vec d = m.points[ids[i]] - p.origin;
-                    double h = d.dot(axis);
-                    z.row(i) << 1, h;
-                    r[i] = (d - h * axis).norm();
-                }
-                Eigen::Vector2d profile = z.colPivHouseholderQr().solve(r);
-                if (profile[0] > 0 && std::abs(profile[1]) > 1e-5 && std::abs(profile[1]) < 100) {
-                    Patch candidate = p;
-                    candidate.kind = "cone";
-                    candidate.axis = axis;
-                    candidate.radius = profile[0];
-                    candidate.secondary = profile[1];
-                    candidates.push_back(candidate);
-                }
-            }
-            for (auto candidate : candidates)
-                if (candidate.kind == "cone" || candidate.kind == "cylinder") {
-                    bool accepted = holds(candidate, m, top, p.triangles, 1e-4);
-                    if (!accepted)
-                        continue;
-                    double error = 0;
-                    for (auto t : p.triangles)
-                        error +=
-                            1 - std::abs(normal(candidate, top.centers[t]).dot(top.normals[t]));
-                    if (error < sphere_error * .8) {
-                        candidate.body = p.body;
-                        candidate.part = p.part;
-                        surface(candidate);
-                        p = std::move(candidate);
-                        break;
-                    }
-                }
-        }
     std::vector<unsigned> assigned(n);
     for (unsigned i = 0; i < merged.size(); ++i)
         for (auto t : merged[i].triangles)
@@ -1647,6 +1672,159 @@ std::vector<Patch> detect(const Mesh &m, Context &ctx) {
     trace("detection complete");
     return merged;
 }
+std::vector<Patch> detect(const Mesh &m, Context &ctx) {
+    auto patches = analytic_patches(m, ctx);
+    if (ctx.options.curves)
+        snap_patches(m, patches, ctx);
+    return finish_patches(m, std::move(patches), ctx);
+}
+void snap_patches(const Mesh &m, std::vector<Patch> &patches, const Context &,
+                  const std::string &round_unit) {
+    const auto top = topology(m);
+    if (round_unit.empty() && reference_analysis(patches)) {
+        reference_snap(m, top, patches);
+        return;
+    }
+    double magnitude = 0;
+    for (const auto &p : m.points)
+        magnitude = std::max(magnitude, p.cwiseAbs().maxCoeff());
+    const double tolerance = 2 * (.001 + 2e-7 * magnitude);
+    // _with_radius: refit a fixed-radius surface's position, retaining its axis.
+    auto fixed_radius = [&](Patch p, double radius) {
+        auto ids = vertices(m, p.triangles);
+        if (p.kind == "sphere") {
+            for (unsigned iteration = 0; iteration < 30; ++iteration) {
+                Eigen::MatrixXd J(ids.size(), 3);
+                Eigen::VectorXd residual(ids.size());
+                for (unsigned i = 0; i < ids.size(); ++i) {
+                    Vec q = m.points[ids[i]] - p.origin;
+                    double d = std::max(q.norm(), 1e-12);
+                    J.row(i) = -q / d;
+                    residual[i] = -(d - radius);
+                }
+                Vec step = J.colPivHouseholderQr().solve(residual);
+                p.origin += step;
+                if (step.cwiseAbs().maxCoeff() < 1e-13)
+                    break;
+            }
+            p.radius = radius;
+        } else {
+            Vec e = p.axis.unitOrthogonal(), f = p.axis.cross(e);
+            Eigen::Vector2d center;
+            if (p.kind == "cylinder")
+                center << p.origin.dot(e), p.origin.dot(f);
+            else
+                center << p.radius, 0.;
+            for (unsigned iteration = 0; iteration < 30; ++iteration) {
+                Eigen::MatrixXd J(ids.size(), 2);
+                Eigen::VectorXd residual(ids.size());
+                for (unsigned i = 0; i < ids.size(); ++i) {
+                    const auto &q = m.points[ids[i]];
+                    Eigen::Vector2d xy;
+                    if (p.kind == "cylinder")
+                        xy << q.dot(e), q.dot(f);
+                    else {
+                        Vec v = q - p.origin;
+                        double z = v.dot(p.axis);
+                        xy << (v - z * p.axis).norm(), z;
+                    }
+                    Eigen::Vector2d d = xy - center;
+                    double length = std::max(d.norm(), 1e-12);
+                    J.row(i) = -d / length;
+                    residual[i] = -(length - radius);
+                }
+                Eigen::Vector2d step = J.colPivHouseholderQr().solve(residual);
+                center += step;
+                if (step.cwiseAbs().maxCoeff() < 1e-13)
+                    break;
+            }
+            if (p.kind == "cylinder") {
+                p.origin = center[0] * e + center[1] * f;
+                p.radius = radius;
+            } else {
+                p.origin += center[1] * p.axis;
+                p.radius = center[0];
+                p.secondary = radius;
+            }
+        }
+        return p;
+    };
+    auto accept = [&](unsigned i, Patch p) {
+        if (p.radius > 0 && holds(p, m, top, p.triangles, tolerance)) {
+            surface(p);
+            patches[i] = std::move(p);
+        }
+    };
+    for (unsigned i = 0; i < patches.size(); ++i) {
+        auto p = patches[i];
+        if (p.kind != "cylinder" && p.kind != "cone" && p.kind != "torus")
+            continue;
+        Eigen::Index k;
+        p.axis.cwiseAbs().maxCoeff(&k);
+        Vec axis = Vec::Zero();
+        axis[k] = p.axis[k] > 0 ? 1 : -1;
+        double dot = std::abs(p.axis.dot(axis));
+        if (dot >= 1 - 1e-12 || dot < std::cos(.1 * 3.14159265358979323846 / 180))
+            continue;
+        p.axis = axis;
+        if (p.kind == "cylinder") {
+            auto ids = vertices(m, p.triangles);
+            Vec e = axis.unitOrthogonal(), f = axis.cross(e);
+            Eigen::MatrixXd A(ids.size(), 3);
+            Eigen::VectorXd b(ids.size());
+            for (unsigned j = 0; j < ids.size(); ++j) {
+                double x = m.points[ids[j]].dot(e), y = m.points[ids[j]].dot(f);
+                A.row(j) << 2 * x, 2 * y, 1;
+                b[j] = x * x + y * y;
+            }
+            Eigen::Vector3d c = A.colPivHouseholderQr().solve(b);
+            p.origin = c[0] * e + c[1] * f;
+            p = fixed_radius(p, patches[i].radius);
+        }
+        accept(i, std::move(p));
+    }
+    std::vector<std::pair<double, unsigned>> radii;
+    for (unsigned i = 0; i < patches.size(); ++i) {
+        const auto &p = patches[i];
+        if (p.kind == "cylinder" || p.kind == "sphere" || p.kind == "torus")
+            radii.emplace_back(p.kind == "torus" ? p.secondary : p.radius, i);
+    }
+    std::sort(radii.begin(), radii.end());
+    for (unsigned begin = 0; begin < radii.size();) {
+        unsigned end = begin + 1;
+        while (end < radii.size() &&
+               radii[end].first - radii[end - 1].first <= .002 * radii[end].first)
+            ++end;
+        double sum = 0, weight = 0;
+        for (unsigned j = begin; j < end; ++j) {
+            double area = 0;
+            for (auto t : patches[radii[j].second].triangles)
+                area += top.areas[t];
+            sum += area * radii[j].first;
+            weight += area;
+        }
+        if (weight > 0) {
+            double target = sum / weight;
+            if (!round_unit.empty()) {
+                bool inch = round_unit == "inch";
+                double unit = inch ? 25.4 : 1;
+                const auto steps = inch ? std::vector<double>{1. / 16, .05, 1. / 64, .01}
+                                        : std::vector<double>{.5, .1};
+                for (double step : steps) {
+                    double nice = std::nearbyint(target / unit / step) * step * unit;
+                    if (nice > 0 && std::abs(nice - target) <= .002 * target) {
+                        target = nice;
+                        break;
+                    }
+                }
+            }
+            for (unsigned j = begin; j < end; ++j)
+                if (radii[j].first != target)
+                    accept(radii[j].second, fixed_radius(patches[radii[j].second], target));
+        }
+        begin = end;
+    }
+}
 void design_size(Mesh &mesh, std::vector<Patch> &patches, Context &ctx) {
     // Port of sizing.py: weighted distinct measurements, explicit slicer/unit
     // hypotheses, and a clear-margin requirement against the unscaled baseline.
@@ -1655,8 +1833,6 @@ void design_size(Mesh &mesh, std::vector<Patch> &patches, Context &ctx) {
     };
     std::vector<Measurement> values;
     std::vector<double> areas(patches.size());
-    std::vector<Vec> normals(patches.size());
-    std::map<std::pair<unsigned, unsigned>, std::vector<unsigned>> bodies;
     auto full_turn = [&](const Patch &p) {
         struct Rim {
             unsigned count = 0, a = 0, b = 0;
@@ -1728,11 +1904,6 @@ void design_size(Mesh &mesh, std::vector<Patch> &patches, Context &ctx) {
                             .norm() /
                         2;
         }
-        auto tri = mesh.triangles[p.triangles.front()];
-        normals[i] = (mesh.points[tri[1]] - mesh.points[tri[0]])
-                         .cross(mesh.points[tri[2]] - mesh.points[tri[0]])
-                         .normalized();
-        bodies[{p.part, p.body}].push_back(i);
         if (p.kind == "cylinder" || p.kind == "sphere" || p.kind == "torus" || p.kind == "pipe") {
             double radius = p.kind == "torus" ? p.secondary : p.radius;
             if (radius > 0)
@@ -1740,28 +1911,51 @@ void design_size(Mesh &mesh, std::vector<Patch> &patches, Context &ctx) {
                     {radius * ((p.kind != "pipe" && full_turn(p)) ? 2 : 1), std::sqrt(areas[i])});
         }
     }
-    for (const auto &body : bodies) {
-        double total = 0;
-        std::vector<unsigned> planes;
-        for (auto i : body.second) {
-            total += areas[i];
-            if (patches[i].kind == "plane")
-                planes.push_back(i);
+    // sizing._measure uses the mesh's biggest facets, including facets no
+    // analytic feature claimed. Fitted plane patches alone miss wall gaps,
+    // and measuring after freeform fitting lets optional surfaces vote on size.
+    auto top = topology(mesh);
+    std::vector<std::vector<unsigned>> flat(mesh.triangles.size());
+    for (unsigned i = 0; i < flat.size(); ++i)
+        for (auto j : top.neighbors[i])
+            if (top.normals[i].dot(top.normals[j]) > std::cos(.05 * 3.14159265358979323846 / 180))
+                flat[i].push_back(j);
+    struct Facet {
+        double area;
+        Vec center, normal;
+    };
+    std::map<unsigned, std::vector<Facet>> bodies;
+    for (const auto &group : components(flat)) {
+        double area = 0;
+        Vec center = Vec::Zero(), normal = Vec::Zero();
+        for (auto t : group) {
+            area += top.areas[t];
+            center += top.areas[t] * top.centers[t];
+            normal += top.areas[t] * top.normals[t];
         }
-        std::sort(planes.begin(), planes.end(),
-                  [&](unsigned a, unsigned b) { return areas[a] > areas[b]; });
-        if (planes.size() > 40)
-            planes.resize(40);
-        for (unsigned a = 0; a < planes.size(); ++a)
-            if (areas[planes[a]] > 1e-3 * total)
-                for (unsigned b = 0; b < a; ++b)
-                    if (normals[planes[a]].dot(normals[planes[b]]) < -.99999) {
+        if (area > 0 && normal.norm() > 0)
+            bodies[mesh.parts.empty() ? 0 : mesh.parts[group.front()]].push_back(
+                {area, center / area, normal.normalized()});
+    }
+    for (auto &body : bodies) {
+        double total = 0;
+        auto &facets = body.second;
+        for (const auto &f : facets)
+            total += f.area;
+        std::stable_sort(facets.begin(), facets.end(),
+                         [](const Facet &a, const Facet &b) { return a.area > b.area; });
+        if (facets.size() > 40)
+            facets.resize(40);
+        for (unsigned a = 0; a < facets.size(); ++a)
+            if (facets[a].area > 1e-3 * total)
+                for (unsigned b = a + 1; b < facets.size(); ++b)
+                    if (facets[b].area > 1e-3 * total &&
+                        facets[a].normal.dot(facets[b].normal) < -.99999) {
                         double gap =
-                            std::abs((patches[planes[a]].origin - patches[planes[b]].origin)
-                                         .dot(normals[planes[a]]));
+                            std::abs((facets[b].center - facets[a].center).dot(facets[a].normal));
                         if (gap > 0)
                             values.push_back(
-                                {gap, std::sqrt(std::min(areas[planes[a]], areas[planes[b]]))});
+                                {gap, std::sqrt(std::min(facets[a].area, facets[b].area))});
                     }
     }
     std::sort(values.begin(), values.end(),
@@ -1856,6 +2050,7 @@ void design_size(Mesh &mesh, std::vector<Patch> &patches, Context &ctx) {
         if (p.kind == "torus" || p.kind.rfind("thread_", 0) == 0)
             p.secondary *= best.factor;
         p.deviation *= best.factor;
+        p.rim_deviation *= best.factor;
         if (p.kind == "plane" || p.kind == "cylinder" || p.kind == "cone" || p.kind == "sphere" ||
             p.kind == "torus")
             surface(p);
@@ -1865,31 +2060,6 @@ void design_size(Mesh &mesh, std::vector<Patch> &patches, Context &ctx) {
             p.surface = Handle(Geom_Surface)::DownCast(p.surface->Transformed(transform));
         }
     }
-    for (auto &p : patches)
-        if (p.kind == "cylinder" || p.kind == "sphere") {
-            double unit = best.inch ? 25.4 : 1, x = p.radius / unit;
-            std::vector<double> steps = best.inch ? std::vector<double>{1. / 16, .05, 1. / 64, .01}
-                                                  : std::vector<double>{.5, .1};
-            for (double step : steps) {
-                double target = std::nearbyint(x / step) * step * unit;
-                if (target <= 0 ||
-                    std::abs(target - p.radius) >
-                        std::min(std::max(.0015 * p.radius, .002), .05 * step * unit))
-                    continue;
-                auto candidate = p;
-                candidate.radius = target;
-                bool fits = true;
-                for (auto v : vertices(mesh, p.triangles))
-                    if (deviation(candidate, mesh.points[v]) >
-                        std::max(1e-4, std::min(.002, ctx.options.accuracy * .02)))
-                        fits = false;
-                if (fits) {
-                    surface(candidate);
-                    p = std::move(candidate);
-                }
-                break;
-            }
-        }
     ctx.diagnostics.repairs.push_back("Applied inferred design scale " +
                                       std::to_string(best.factor));
 }

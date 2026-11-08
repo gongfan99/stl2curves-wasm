@@ -6,6 +6,7 @@
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepLib.hxx>
 #include <BRepTools.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GeomConvert.hxx>
 #include <Geom_BSplineSurface.hxx>
@@ -49,8 +50,8 @@ void cylinder_boundaries(double start, bool stepped, bool recovery, bool bad_pla
     constexpr unsigned segments = 36, ring = segments + 1;
     constexpr double radius = 10, high = 3.5, low = 2;
     Mesh mesh;
-    const std::vector<double> heights = stepped ? std::vector<double>{0, low, high}
-                                                : std::vector<double>{0, high};
+    const std::vector<double> heights =
+        stepped ? std::vector<double>{0, low, high} : std::vector<double>{0, high};
     for (double z : heights)
         for (unsigned i = 0; i <= segments; ++i) {
             double angle = start + pi / 2 * i / segments;
@@ -214,6 +215,81 @@ void freeform_solid() {
           "freeform roof STEP round trip");
     check(restored.faces == 6 && restored.surface_counts["bspline"] == 1,
           "freeform roof STEP topology");
+
+    // Force the recovery builder, rather than allowing the initial shared-run
+    // builder to hide a per-chord trim regression. Both sides of each curved
+    // roof/wall junction must retain one edge, as Python's _wire does.
+    auto recovered = recover(mesh, patches, ctx);
+    ShapeMap input_vertices;
+    TopExp::MapShapes(recovered, TopAbs_VERTEX, input_vertices);
+    BRep_Builder builder;
+    std::vector<double> input_tolerances;
+    for (int i = 1; i <= input_vertices.Extent(); ++i) {
+        auto vertex = TopoDS::Vertex(input_vertices(i));
+        builder.UpdateVertex(vertex, .1);
+        input_tolerances.push_back(BRep_Tool::Tolerance(vertex));
+    }
+    recovered = join_boundary_runs(recovered, mesh, patches, ctx.options.tolerance);
+    for (int i = 1; i <= input_vertices.Extent(); ++i)
+        check(BRep_Tool::Tolerance(TopoDS::Vertex(input_vertices(i))) == input_tolerances[i - 1],
+              "boundary joining must preserve the input's sewing tolerances");
+    check(inspect(recovered, info) && info.faces == 6,
+          "recovered freeform roof retains all six faces");
+    ShapeMap recovered_edges;
+    TopExp::MapShapes(recovered, TopAbs_EDGE, recovered_edges);
+    check(recovered_edges.Extent() == 12,
+          "recovered roof must use twelve whole boundary edges, not mesh-chord segments (got " +
+              std::to_string(recovered_edges.Extent()) + ")");
+    unsigned splines = 0;
+    for (int i = 1; i <= recovered_edges.Extent(); ++i)
+        splines +=
+            BRepAdaptor_Curve(TopoDS::Edge(recovered_edges(i))).GetType() == GeomAbs_BSplineCurve;
+    check(splines == 4, "each recovered curved roof rim must be one smooth spline");
+}
+void planar_strip_roof() {
+    // A curved roof exported as broad, planar strips, each with six triangles.
+    // Recognizing those strips as permanent planes prevents the smooth fitter
+    // from recovering the roof. The large side walls establish its facet scale.
+    constexpr unsigned nx = 16, ny = 4, layer = nx * ny;
+    Mesh mesh;
+    for (unsigned z = 0; z < 2; ++z)
+        for (unsigned y = 0; y < ny; ++y)
+            for (unsigned x = 0; x < nx; ++x) {
+                double u = 10. * x / (nx - 1), v = .3 * y / (ny - 1);
+                mesh.points.emplace_back(u, v, z ? 3 + .05 * u * u : 0);
+            }
+    auto id = [](unsigned x, unsigned y) { return y * nx + x; };
+    auto triangle = [&](unsigned a, unsigned b, unsigned c) {
+        mesh.triangles.push_back({a, b, c});
+    };
+    for (unsigned y = 0; y + 1 < ny; ++y)
+        for (unsigned x = 0; x + 1 < nx; ++x) {
+            unsigned a = id(x, y), b = id(x + 1, y), c = id(x, y + 1), d = id(x + 1, y + 1);
+            triangle(a, d, b);
+            triangle(a, c, d);
+            triangle(a + layer, b + layer, d + layer);
+            triangle(a + layer, d + layer, c + layer);
+        }
+    auto wall = [&](unsigned a, unsigned b) {
+        triangle(a, b, b + layer);
+        triangle(a, b + layer, a + layer);
+    };
+    for (unsigned x = 0; x + 1 < nx; ++x) {
+        wall(id(x, 0), id(x + 1, 0));
+        wall(id(x + 1, ny - 1), id(x, ny - 1));
+    }
+    for (unsigned y = 0; y + 1 < ny; ++y) {
+        wall(id(0, y + 1), id(0, y));
+        wall(id(nx - 1, y), id(nx - 1, y + 1));
+    }
+    Context ctx;
+    auto patches = detect(mesh, ctx);
+    auto shape = reconstruct(mesh, patches, ctx);
+    Diagnostics info;
+    check(inspect(shape, info), "planar-strip roof must close");
+    check(info.faces == 6 && info.surface_counts["plane"] == 5,
+          "planar mesh strips must recover one smooth roof and five planes");
+    check(std::abs(info.volume - 14.) < .01, "planar-strip roof volume");
 }
 void periodic_spline_boundaries() {
     // Generic periodic B-spline trims create separate charts at their seam.
@@ -320,6 +396,7 @@ int main() {
         cylinder_boundaries(.7, false, false, false, false, true);
         cylinder_boundaries(5.7, true, true, false, false, true);
         freeform_solid();
+        planar_strip_roof();
         periodic_spline_boundaries();
     } catch (const std::exception &error) {
         std::cerr << "boundary recovery and freeform reconstruction: " << error.what() << '\n';

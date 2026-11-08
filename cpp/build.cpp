@@ -17,6 +17,7 @@
 #include <BRepCheck_Result.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepClass_FaceClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepLib.hxx>
 #include <BRepTools.hxx>
@@ -26,6 +27,7 @@
 #include <BRep_Tool.hxx>
 #include <Eigen/Geometry>
 #include <GCPnts_AbscissaPoint.hxx>
+#include <GC_MakeArcOfCircle.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom2d_Line.hxx>
@@ -34,16 +36,20 @@
 #include <GeomAPI_PointsToBSpline.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomAdaptor_Curve.hxx>
 #include <GeomProjLib.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_Line.hxx>
 #include <Geom_Plane.hxx>
+#include <Geom_TrimmedCurve.hxx>
 #include <ShapeAnalysis_ShapeTolerance.hxx>
 #include <ShapeFix_Edge.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <ShapeFix_ShapeTolerance.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
@@ -61,6 +67,7 @@
 #include <tuple>
 
 namespace stl2curves::detail {
+TopoDS_Shape reference_surface_face(const Patch &patch, bool generous);
 namespace {
 gp_Pnt point(const Vec &v) {
     return gp_Pnt(v.x(), v.y(), v.z());
@@ -496,6 +503,11 @@ TopoDS_Shape rejoin_exact(TopoDS_Shape shape, const Mesh &mesh, double tolerance
     return reshape->Apply(shape);
 }
 struct Boundaries {
+    std::set<Edge> singles;
+    mutable std::map<std::vector<unsigned>, TopoDS_Edge> runs;
+    std::vector<unsigned> owners;
+    std::vector<bool> curved;
+    std::map<Edge, std::pair<unsigned, unsigned>> sides;
     std::map<Edge, TopoDS_Edge> edges;
     std::map<unsigned, TopoDS_Vertex> vertices;
     std::vector<bool> crowded;
@@ -519,6 +531,260 @@ std::map<Edge, Rim> patch_rim(const Mesh &mesh, const std::vector<unsigned> &ids
     }
     return rim;
 }
+TopoDS_Edge mesh_chord(const Handle(Geom_Surface) & surface, const Vec &a, const Vec &b,
+                       const gp_Pnt2d &ua, const gp_Pnt2d &ub, TopoDS_Vertex va, TopoDS_Vertex vb,
+                       double tolerance) try {
+    Vec d = b - a;
+    double length = d.norm();
+    if (length < 1e-10)
+        return {};
+    Handle(Geom_Curve) curve = new Geom_Line(point(a), gp_Dir(d.x(), d.y(), d.z()));
+    double error = tolerance * .01;
+    auto pc = GeomProjLib::Curve2d(curve, 0, length, surface, error);
+    if (pc.IsNull())
+        return {};
+    auto mid = pc->Value(length * .5);
+    pc->Translate(
+        gp_Vec2d(surface->IsUPeriodic()
+                     ? std::round(((ua.X() + ub.X()) * .5 - mid.X()) / surface->UPeriod()) *
+                           surface->UPeriod()
+                     : 0,
+                 surface->IsVPeriodic()
+                     ? std::round(((ua.Y() + ub.Y()) * .5 - mid.Y()) / surface->VPeriod()) *
+                           surface->VPeriod()
+                     : 0));
+    double gap = 0;
+    for (double t : {0., .125, .25, .5, .75, .875, 1.}) {
+        auto uv = pc->Value(t * length);
+        gap = std::max(gap, curve->Value(t * length).Distance(surface->Value(uv.X(), uv.Y())));
+    }
+    if (gap > tolerance)
+        return {};
+    BRep_Builder builder;
+    double ga = BRep_Tool::Pnt(va).Distance(point(a)), gb = BRep_Tool::Pnt(vb).Distance(point(b));
+    if (std::max(ga, gb) > tolerance)
+        return {};
+    builder.UpdateVertex(va, std::max(1e-7, ga * 1.01));
+    builder.UpdateVertex(vb, std::max(1e-7, gb * 1.01));
+    BRepBuilderAPI_MakeEdge make(curve, va, vb, 0, length);
+    if (!make.IsDone())
+        return {};
+    auto edge = make.Edge();
+    builder.UpdateEdge(edge, pc, surface, TopLoc_Location(), std::max({error, 1e-7, gap * 1.01}));
+    builder.Range(edge, 0, length);
+    return edge;
+} catch (const Standard_Failure &) {
+    // A failed optional chord projection keeps the existing trim path.
+    return {};
+}
+
+TopoDS_Wire run_wire(const Mesh &mesh, const Patch &patch, const std::vector<unsigned> &loop,
+                     const Boundaries &boundaries, double tolerance) {
+    if (loop.size() < 3 || boundaries.owners.empty())
+        return {};
+    const auto none = ~0u;
+    unsigned own = boundaries.owners[patch.triangles.front()];
+    if (own >= boundaries.curved.size())
+        return {};
+    std::vector<unsigned> tags;
+    for (unsigned i = 0; i < loop.size(); ++i) {
+        auto found = boundaries.sides.find(Edge(loop[i], loop[(i + 1) % loop.size()]));
+        unsigned other = none;
+        if (found != boundaries.sides.end())
+            other = found->second.first == own ? found->second.second : found->second.first;
+        bool curved = boundaries.curved[own] ||
+                      (other < boundaries.curved.size() && boundaries.curved[other]);
+        tags.push_back(curved ? other : none - 1);
+    }
+    std::vector<unsigned> cuts;
+    for (unsigned i = 0; i < loop.size(); ++i) {
+        unsigned before = (i + loop.size() - 1) % loop.size();
+        Vec u = mesh.points[loop[i]] - mesh.points[loop[before]],
+            v = mesh.points[loop[(i + 1) % loop.size()]] - mesh.points[loop[i]];
+        if (tags[i] == none - 1 || tags[i] != tags[before] ||
+            u.dot(v) < .8660254037844386 * u.norm() * v.norm())
+            cuts.push_back(i);
+    }
+    std::vector<std::vector<unsigned>> runs;
+    if (cuts.empty()) {
+        runs.push_back(loop);
+        runs.back().push_back(loop.front());
+    } else
+        for (unsigned j = 0; j < cuts.size(); ++j) {
+            unsigned begin = cuts[j], end = cuts[(j + 1) % cuts.size()];
+            std::vector<unsigned> run{loop[begin]};
+            unsigned k = (begin + 1) % loop.size();
+            while (k != end) {
+                run.push_back(loop[k]);
+                k = (k + 1) % loop.size();
+            }
+            run.push_back(loop[end]);
+            runs.push_back(std::move(run));
+        }
+    BRepBuilderAPI_MakeWire wire;
+    for (auto ids : runs) {
+        bool closed = ids.front() == ids.back(), flip;
+        if (closed) {
+            ids.pop_back();
+            auto start = std::min_element(ids.begin(), ids.end());
+            std::rotate(ids.begin(), start, ids.end());
+            flip = ids[1] > ids.back();
+            if (flip)
+                std::reverse(ids.begin() + 1, ids.end());
+            ids.push_back(ids.front());
+        } else {
+            flip = ids.front() > ids.back();
+            if (flip)
+                std::reverse(ids.begin(), ids.end());
+        }
+        auto cached = boundaries.runs.find(ids);
+        TopoDS_Edge edge;
+        if (cached != boundaries.runs.end())
+            edge = cached->second;
+        else
+            try {
+                auto existing = boundaries.edges.find(Edge(ids[0], ids[1]));
+                if (ids.size() == 2 && existing != boundaries.edges.end() && patch.kind != "sphere")
+                    edge = existing->second;
+                else {
+                    Handle(Geom_Curve) curve;
+                    double first = 0, last = 0;
+                    if (existing != boundaries.edges.end()) {
+                        auto candidate = BRep_Tool::Curve(existing->second, first, last);
+                        bool on = !candidate.IsNull() &&
+                                  !candidate->IsKind(STANDARD_TYPE(Geom_BSplineCurve)) &&
+                                  !(patch.kind == "sphere" && ids.size() == 2);
+                        double previous = 0, sign = 0;
+                        for (unsigned i = 0; i < ids.size() && on; ++i) {
+                            GeomAPI_ProjectPointOnCurve projection(point(mesh.points[ids[i]]),
+                                                                   candidate);
+                            if (!projection.NbPoints() ||
+                                projection.LowerDistance() > std::max(1e-6, tolerance * .001)) {
+                                on = false;
+                                break;
+                            }
+                            double t = projection.LowerDistanceParameter();
+                            if (i && candidate->IsPeriodic())
+                                t += std::round((previous - t) / candidate->Period()) *
+                                     candidate->Period();
+                            if (!i)
+                                first = t;
+                            else if (i == 1)
+                                sign = t - previous;
+                            else if ((t - previous) * sign < -1e-12)
+                                on = false;
+                            previous = t;
+                            last = t;
+                        }
+                        if (on && std::abs(last - first) > 1e-10)
+                            curve = candidate;
+                    }
+                    if (curve.IsNull()) {
+                        if (ids.size() == 2) {
+                            auto delta = mesh.points[ids.back()] - mesh.points[ids.front()];
+                            if (delta.norm() < 1e-10)
+                                return {};
+                            curve = new Geom_Line(point(mesh.points[ids.front()]),
+                                                  gp_Dir(delta.x(), delta.y(), delta.z()));
+                            first = 0;
+                            last = delta.norm();
+                            if (patch.kind == "sphere") {
+                                Vec a = mesh.points[ids.front()], b = mesh.points[ids.back()],
+                                    mid = (a + b) * .5, radial = mid - patch.origin;
+                                double bow = radial.norm() - patch.radius;
+                                if (radial.norm() > 1e-10 &&
+                                    std::abs(bow) <=
+                                        delta.squaredNorm() / (4 * patch.radius) + 1e-4 &&
+                                    std::abs(bow) > 1e-10) {
+                                    Vec at = mid - bow * radial.normalized();
+                                    GC_MakeArcOfCircle arc(point(a), point(at), point(b));
+                                    if (arc.IsDone()) {
+                                        curve = Handle(Geom_Curve)(arc.Value().get());
+                                        first = curve->FirstParameter();
+                                        last = curve->LastParameter();
+                                    }
+                                }
+                            }
+
+                        } else {
+                            std::vector<Vec> points;
+                            for (unsigned i = 0; i < ids.size(); ++i)
+                                if (points.empty() ||
+                                    (mesh.points[ids[i]] - points.back()).norm() > 1e-6)
+                                    points.push_back(mesh.points[ids[i]]);
+                            if (points.size() < 3)
+                                return {};
+                            std::vector<double> lengths;
+                            for (unsigned i = 1; i < points.size(); ++i)
+                                lengths.push_back((points[i] - points[i - 1]).norm());
+                            auto sorted = lengths;
+                            std::sort(sorted.begin(), sorted.end());
+                            double typical = sorted.size() > 3 ? (sorted[(sorted.size() - 1) / 2] +
+                                                                  sorted[sorted.size() / 2]) *
+                                                                     .5
+                                                               : sorted.front();
+                            if (typical < 1e-10)
+                                return {};
+                            std::vector<Vec> samples;
+                            for (unsigned i = 1; i < points.size(); ++i) {
+                                unsigned count =
+                                    lengths[i - 1] > 3 * typical
+                                        ? std::min(16u,
+                                                   unsigned(std::ceil(lengths[i - 1] / typical)))
+                                        : 1;
+                                for (unsigned j = 0; j < count; ++j)
+                                    samples.push_back(points[i - 1] + (points[i] - points[i - 1]) *
+                                                                          (double(j) / count));
+                            }
+                            if (!closed)
+                                samples.push_back(points.back());
+                            Handle(PointHandleArray) data = new PointHandleArray(1, samples.size());
+                            for (unsigned i = 0; i < samples.size(); ++i)
+                                data->SetValue(i + 1, point(samples[i]));
+                            GeomAPI_Interpolate interpolate(data, closed, 1e-7);
+                            interpolate.Perform();
+                            if (!interpolate.IsDone())
+                                return {};
+                            curve = interpolate.Curve();
+                            first = curve->FirstParameter();
+                            last = curve->LastParameter();
+                        }
+                    }
+                    auto corner = [&](unsigned id, const gp_Pnt &on) {
+                        auto found = boundaries.vertices.find(id);
+                        auto vertex =
+                            found == boundaries.vertices.end()
+                                ? BRepBuilderAPI_MakeVertex(point(mesh.points[id])).Vertex()
+                                : found->second;
+                        double gap = BRep_Tool::Pnt(vertex).Distance(on);
+                        if (gap > tolerance)
+                            throw std::runtime_error("Run endpoint off its curve");
+                        BRep_Builder().UpdateVertex(vertex, std::max(1e-7, gap * 1.01));
+                        return vertex;
+                    };
+                    auto a = corner(ids.front(), curve->Value(first)),
+                         b = closed ? a : corner(ids.back(), curve->Value(last));
+                    BRepBuilderAPI_MakeEdge make(curve, last < first ? b : a, last < first ? a : b,
+                                                 std::min(first, last), std::max(first, last));
+                    if (!make.IsDone())
+                        return {};
+                    edge = make.Edge();
+                    if (last < first)
+                        edge.Reverse();
+                }
+                boundaries.runs.emplace(ids, edge);
+            } catch (const Standard_Failure &) {
+                return {};
+            }
+        if (edge.IsNull())
+            return {};
+        if (flip)
+            edge.Reverse();
+        wire.Add(edge);
+    }
+    return wire.IsDone() ? wire.Wire() : TopoDS_Wire{};
+}
+
 std::vector<std::vector<unsigned>> unpinched_groups(const std::vector<Tri> &triangles) {
     // Python _unpinched: grow across shared edges without adding a triangle
     // that also touches the group at an isolated corner. Such a pinch cannot
@@ -683,6 +949,14 @@ std::vector<TopoDS_Face> planar_patch(const Mesh &mesh, const Patch &patch,
     return faces;
 }
 TopoDS_Face natural_patch(const Mesh &mesh, const Patch &patch, double tolerance) {
+    if (patch.trimmed)
+        return {};
+    if (patch.reference_feature) {
+        auto shape = reference_surface_face(patch, false);
+        if (!shape.IsNull())
+            for (TopExp_Explorer face(shape, TopAbs_FACE); face.More(); face.Next())
+                return TopoDS::Face(face.Current());
+    }
     if (patch.kind != "cylinder" && patch.kind != "cone" && patch.kind != "sphere" &&
         patch.kind != "torus")
         return {};
@@ -943,8 +1217,13 @@ std::vector<TopoDS_Face> trimmed_patch(const Mesh &mesh, const Patch &patch, dou
                 if (delta.Magnitude() < 1e-12)
                     return {};
                 TopoDS_Edge edge;
+                if ((patch.kind == "freeform" || patch.kind == "blend") &&
+                    boundaries.singles.count(Edge(a.original, b.original)))
+                    edge =
+                        mesh_chord(patch.surface, mesh.points[a.original], mesh.points[b.original],
+                                   a.uv, b.uv, a.shape, b.shape, tolerance);
                 auto exact = boundaries.edges.find(Edge(a.original, b.original));
-                if (exact != boundaries.edges.end()) {
+                if (edge.IsNull() && exact != boundaries.edges.end()) {
                     double first, last;
                     auto curve = BRep_Tool::Curve(exact->second, first, last);
                     double error = tolerance * .01;
@@ -1064,7 +1343,9 @@ std::vector<TopoDS_Face> outline_patch(const Mesh &mesh, const Patch &patch,
         unsigned start = next.begin()->first, current = start;
         BRepBuilderAPI_MakeWire wire;
         double area = 0;
+        std::vector<unsigned> ordered;
         do {
+            ordered.push_back(current);
             auto found = next.find(current);
             if (found == next.end())
                 return {};
@@ -1085,8 +1366,13 @@ std::vector<TopoDS_Face> outline_patch(const Mesh &mesh, const Patch &patch,
         } while (current != start);
         if (!wire.IsDone())
             return {};
+        auto whole = polygon || patch.kind != "sphere"
+                         ? TopoDS_Wire{}
+                         : run_wire(mesh, patch, ordered, boundaries, tolerance);
         loops.push_back(
-            {TopoDS::Wire(BRepBuilderAPI_Copy(wire.Wire(), true, false).Shape()), area});
+            {TopoDS::Wire(
+                 BRepBuilderAPI_Copy(whole.IsNull() ? wire.Wire() : whole, true, false).Shape()),
+             area});
     }
     if (loops.empty())
         return {};
@@ -1106,11 +1392,12 @@ std::vector<TopoDS_Face> outline_patch(const Mesh &mesh, const Patch &patch,
         if (!make.IsDone())
             continue;
         ShapeFix_Face fix(make.Face());
-        fix.SetMaxTolerance(tolerance);
+        fix.SetMaxTolerance(std::max(1., tolerance));
         fix.Perform();
         auto face = fix.Face();
         ShapeAnalysis_ShapeTolerance analysis;
-        if (!BRepCheck_Analyzer(face).IsValid() || analysis.Tolerance(face, 1) > tolerance)
+        if (!BRepCheck_Analyzer(face).IsValid() ||
+            analysis.Tolerance(face, 1) > std::max(1., tolerance))
             continue;
         GProp_GProps properties;
         BRepGProp::SurfaceProperties(face, properties);
@@ -1280,6 +1567,9 @@ Boundaries shared_boundaries(const Mesh &mesh, const std::vector<Patch> &patches
     Boundaries out;
     // Like upstream SHARED_CROWD: let sewing own close corners rather than
     // pre-joining only some of the faces meeting a short edge.
+    // This is a fixed mesh-space distance, independent of adaptive sewing:
+    // tying it to sewing would expand the exclusion from 0.02 to 0.4 mm.
+    constexpr double shared_crowd = .02;
     BoundaryCloud cloud{mesh.points};
     using Tree =
         nanoflann::KDTreeSingleIndexAdaptor<nanoflann::L2_Simple_Adaptor<double, BoundaryCloud>,
@@ -1291,7 +1581,7 @@ Boundaries shared_boundaries(const Mesh &mesh, const std::vector<Patch> &patches
         std::size_t nearest[2];
         double distances[2];
         out.crowded[i] = tree.knnSearch(mesh.points[i].data(), 2, nearest, distances) == 2 &&
-                         distances[1] <= 4 * tolerance * tolerance;
+                         distances[1] <= shared_crowd * shared_crowd;
     }
     auto corner = [&](unsigned id, const gp_Pnt &on_curve) {
         if (out.crowded[id]) {
@@ -1826,8 +2116,9 @@ TopoDS_Shape tidy_shape(const TopoDS_Shape &shape, const Mesh &mesh,
                 trace(("same-domain candidate volume_delta=" + std::to_string(delta) +
                        " max_tolerance=" + std::to_string(widest))
                           .c_str());
-                if (!reduced.IsNull() && std::abs(delta) <= allowed && widest <= tolerance &&
-                    volume_agrees(reduced, mesh, patches) && inspect(reduced, info))
+                if (!reduced.IsNull() && std::abs(delta) <= allowed &&
+                    widest <= std::max(1., tolerance) && volume_agrees(reduced, mesh, patches) &&
+                    inspect(reduced, info))
                     return reduced;
                 auto more = bad_merge_edges(checked, merge);
                 if (!merge_faces || more.empty())
@@ -1838,6 +2129,100 @@ TopoDS_Shape tidy_shape(const TopoDS_Shape &shape, const Mesh &mesh,
                 break;
             }
         }
+    }
+    return shape;
+}
+TopoDS_Shape join_boundary_runs(const TopoDS_Shape &shape, const Mesh &mesh,
+                                const std::vector<Patch> &patches, double tolerance) {
+    // The reference facet path already builds one edge per reference run.
+    // Concatenating those runs changes Python's deliberately retained seams.
+    if (std::any_of(patches.begin(), patches.end(),
+                    [](const Patch &p) { return bool(p.reference_feature); }))
+        return shape;
+    if (std::none_of(patches.begin(), patches.end(), [](const Patch &p) {
+            return p.kind == "freeform" || p.kind == "blend" || p.kind == "pipe" ||
+                   p.kind == "extrusion";
+        }))
+        return shape;
+    // Python _wire makes one edge per shared run. The native UV-trim fallback
+    // can represent that same curve as several mesh-sized spans. Join its C1
+    // spline spans only after reconstruction has passed: doing this during
+    // face merging changes which reconstruction attempt wins the volume check.
+    try {
+        Diagnostics before, after;
+        if (!inspect(shape, before))
+            return shape;
+        BRepBuilderAPI_Copy copy(shape, false, false);
+        auto working = copy.Shape();
+        ShapeMap vertices, source_edges;
+        TopExp::MapShapes(working, TopAbs_VERTEX, vertices);
+        TopExp::MapShapes(working, TopAbs_EDGE, source_edges);
+        std::vector<double> vertex_tolerances;
+        const double joining_tolerance = std::max(1e-7, std::min(.005, tolerance * .5));
+        ShapeFix_ShapeTolerance set_tolerance;
+        for (int i = 1; i <= vertices.Extent(); ++i) {
+            auto vertex = TopoDS::Vertex(vertices(i));
+            double original = BRep_Tool::Tolerance(vertex);
+            vertex_tolerances.push_back(original);
+            // ConcatC1 uses vertex tolerances for knot removal. Sewing gaps
+            // must not become permission to reshape an interpolated rim.
+            set_tolerance.SetTolerance(vertex, joining_tolerance, TopAbs_VERTEX);
+        }
+        ShapeUpgrade_UnifySameDomain merge(working, true, false, true);
+        merge.SetSafeInputMode(true);
+        merge.SetLinearTolerance(std::min(.001, tolerance));
+        merge.SetAngularTolerance(.0017453292519943296);
+        merge.Build();
+        auto joined = merge.Shape();
+        BRep_Builder builder;
+        auto history = merge.History();
+        for (int i = 1; i <= vertices.Extent(); ++i) {
+            double original = vertex_tolerances[i - 1];
+            builder.UpdateVertex(TopoDS::Vertex(vertices(i)), original);
+            for (const auto &replacement : history->Modified(vertices(i)))
+                if (replacement.ShapeType() == TopAbs_VERTEX)
+                    builder.UpdateVertex(TopoDS::Vertex(replacement), original);
+        }
+        double displacement = 0;
+        for (int i = 1; i <= source_edges.Extent(); ++i) {
+            auto edge = TopoDS::Edge(source_edges(i));
+            double first, last;
+            auto curve = BRep_Tool::Curve(edge, first, last);
+            if (curve.IsNull() || BRep_Tool::Degenerated(edge))
+                continue;
+            for (const auto &replacement : history->Modified(edge)) {
+                if (replacement.ShapeType() != TopAbs_EDGE)
+                    continue;
+                double a, b;
+                auto target = BRep_Tool::Curve(TopoDS::Edge(replacement), a, b);
+                if (target.IsNull())
+                    continue;
+                for (unsigned j = 0; j <= 16; ++j) {
+                    GeomAPI_ProjectPointOnCurve project(
+                        curve->Value(first + (last - first) * (double(j) / 16)), target, a, b);
+                    displacement = std::max(displacement,
+                                            project.NbPoints() ? project.LowerDistance() : 1e100);
+                }
+            }
+        }
+        ShapeAnalysis_ShapeTolerance analysis;
+        const double widest = joined.IsNull() ? 1e100 : analysis.Tolerance(joined, 1);
+        const double previous_widest = analysis.Tolerance(shape, 1);
+        bool accepted =
+            inspect(joined, after) && after.faces == before.faces &&
+            after.solids == before.solids && after.surface_counts == before.surface_counts &&
+            displacement <= 2 * joining_tolerance &&
+            widest <= std::max(previous_widest, tolerance) &&
+            std::abs(after.volume - before.volume) <= .001 * std::abs(before.volume) + .001 &&
+            volume_agrees(joined, mesh, patches);
+        trace(("boundary run joining accepted=" + std::to_string(accepted) +
+               " volume_delta=" + std::to_string(after.volume - before.volume) + " displacement=" +
+               std::to_string(displacement) + " max_tolerance=" + std::to_string(widest))
+                  .c_str());
+        if (accepted)
+            return joined;
+    } catch (const Standard_Failure &e) {
+        trace(failure_message(e, "Boundary run joining failed"));
     }
     return shape;
 }
@@ -1855,6 +2240,49 @@ TopoDS_Shape build(const Mesh &mesh, const std::vector<Patch> &patches, double t
         } catch (const Standard_Failure &error) {
             throw std::runtime_error(std::string("Boundaries: ") + failure_message(error));
         }
+    if (!patches.empty()) {
+        boundaries.owners.assign(mesh.triangles.size(), ~0u);
+        for (unsigned i = 0; i < patches.size(); ++i) {
+            boundaries.curved.push_back(patches[i].kind != "plane");
+            for (auto t : patches[i].triangles)
+                boundaries.owners[t] = i;
+        }
+        for (const auto &item : topology(mesh).edges) {
+            auto a = boundaries.owners[item.second[0]],
+                 b = item.second.size() > 1 ? boundaries.owners[item.second[1]] : ~0u;
+            boundaries.sides.emplace(item.first, std::make_pair(a, b));
+        }
+    }
+    if (!patches.empty()) {
+        const auto &owner = boundaries.owners;
+        std::map<std::pair<unsigned, unsigned>, std::vector<Edge>> groups;
+        for (const auto &item : topology(mesh).edges)
+            if (item.second.size() == 2) {
+                auto a = owner[item.second[0]], b = owner[item.second[1]];
+                if (a != b && a < patches.size() && b < patches.size())
+                    groups[std::minmax(a, b)].push_back(item.first);
+            }
+        for (const auto &group : groups) {
+            std::map<unsigned, std::vector<unsigned>> adjacent;
+            for (auto e : group.second) {
+                adjacent[e.a].push_back(e.b);
+                adjacent[e.b].push_back(e.a);
+            }
+            auto corner = [&](unsigned v) {
+                auto &neighbors = adjacent[v];
+                if (neighbors.size() != 2)
+                    return true;
+                Vec a = mesh.points[v] - mesh.points[neighbors[0]],
+                    b = mesh.points[neighbors[1]] - mesh.points[v];
+                return a.dot(b) < .8660254037844386 * a.norm() * b.norm();
+            };
+            if (patches[group.first.first].kind == "sphere" ||
+                patches[group.first.second].kind == "sphere")
+                for (auto e : group.second)
+                    if (corner(e.a) && corner(e.b))
+                        boundaries.singles.insert(e);
+        }
+    }
     if (patches.empty())
         for (const auto &t : mesh.triangles)
             add(flat_triangle(mesh, t));
@@ -1879,7 +2307,10 @@ TopoDS_Shape build(const Mesh &mesh, const std::vector<Patch> &patches, double t
                     // for expensive kernel cuts has no C++ call-level equivalent.
                     std::vector<TopoDS_Face> trimmed;
                     try {
-                        trimmed = trimmed_patch(mesh, p, tolerance, boundaries);
+                        if (p.kind == "sphere")
+                            trimmed = outline_patch(mesh, p, boundaries, tolerance);
+                        if (trimmed.empty())
+                            trimmed = trimmed_patch(mesh, p, tolerance, boundaries);
                     } catch (const Standard_Failure &failure) {
                         trace(failure_message(failure, "Trim chart failed"));
                     }
@@ -2065,7 +2496,27 @@ double patch_sewing_tolerance(const Mesh &mesh, const std::vector<Patch> &patche
     return std::max(minimum, std::min(1.5 * worst, cap));
 }
 } // namespace
+#include "build_boundary_runs.hpp"
 TopoDS_Shape reconstruct(const Mesh &mesh, const std::vector<Patch> &patches, Context &ctx) {
+    // Python's default uses shared runs of original mesh points on fitted
+    // outlines. Keep the established analytic path for entirely analytic
+    // models; use its alternatives if a fitted outline cannot build safely.
+    if (std::any_of(patches.begin(), patches.end(), [](const Patch &p) {
+            return p.kind == "freeform" || p.kind == "blend" || p.kind == "pipe" ||
+                   p.kind == "extrusion";
+        })) {
+        try {
+            auto shape = mesh_boundary_shape(mesh, patches, ctx);
+            Diagnostics info;
+            if (inspect(shape, info) && volume_agrees(shape, mesh, patches))
+                return shape;
+        } catch (const Standard_Failure &error) {
+            trace(failure_message(error, "Mesh-boundary reconstruction failed"));
+        } catch (const std::runtime_error &error) {
+            trace(error.what());
+        }
+    }
+
     // Try exact analytic intersections, then smooth fitted junctions with
     // projected analytic trims, then independent projected trims. Every mode
     // must have valid topology; conversion applies the corrected-volume gate
@@ -2256,30 +2707,66 @@ TopoDS_Shape recover(const Mesh &mesh, const std::vector<Patch> &patches, Contex
                                         " of " + std::to_string(curved.size()) + " curved patches");
     return best;
 }
-TopoDS_Shape unite(const std::vector<TopoDS_Shape> &shapes, Context &ctx) {
+TopoDS_Shape unite(const std::vector<TopoDS_Shape> &shapes, Context &ctx, bool overlapping_parts) {
     if (shapes.empty())
         throw std::runtime_error("No shapes to combine");
     if (!ctx.options.fuse)
         return compound(shapes);
+    std::vector<TopoDS_Shape> checked = shapes;
+    if (shapes.size() > 1)
+        for (auto &s : checked)
+            // finish() first calls fuse_overlapping inside each reconstructed
+            // group. Only the subsequent join of distinct STL groups must
+            // preserve their summed volume; 3MF parts may overlap at that join.
+            s = unite({s}, ctx, true);
     std::vector<TopoDS_Shape> bodies;
-    for (const auto &s : shapes)
+    for (const auto &s : checked)
         for (TopExp_Explorer ex(s, TopAbs_SOLID); ex.More(); ex.Next())
             bodies.push_back(ex.Current());
     if (bodies.empty())
         throw std::runtime_error("No solids to fuse");
-    auto shape = bodies.front();
-    for (std::size_t i = 1; i < bodies.size(); ++i) {
-        // Keep boolean fusion sequential; fitting and meshing use the shared
-        // OCCT pool for parallel work.
-        BRepAlgoAPI_Fuse fuse(shape, bodies[i]);
-        fuse.SetRunParallel(false);
-        fuse.SetFuzzyValue(ctx.options.tolerance);
-        fuse.Build();
-        if (!fuse.IsDone() || fuse.Shape().IsNull() || !BRepCheck_Analyzer(fuse.Shape()).IsValid())
-            throw std::runtime_error("Boolean fusion failed validation");
-        shape = fuse.Shape();
+    if (bodies.size() == 1)
+        return bodies.front();
+    // Python fuse_overlapping/fuse_checked: a failed or material-losing union
+    // keeps the already checked bodies side by side. A boolean is optional;
+    // throwing here used to turn a successful reconstruction into a failure.
+    auto apart = compound(checked);
+    double total = 0, biggest = 0;
+    for (const auto &body : bodies) {
+        double v = volume(body);
+        total += v;
+        biggest = std::max(biggest, v);
     }
-    return shape;
+    double low = shapes.size() == 1 ? biggest : total;
+    if (shapes.size() > 1 && overlapping_parts) {
+        low = 0;
+        for (const auto &s : checked)
+            low = std::max(low, volume(s));
+    }
+    const double slack = .001 * std::abs(total) + .001;
+    try {
+        ShapeList args, tools;
+        args.Append(bodies.front());
+        for (std::size_t i = 1; i < bodies.size(); ++i)
+            tools.Append(bodies[i]);
+        BRepAlgoAPI_Fuse fuse;
+        fuse.SetArguments(args);
+        fuse.SetTools(tools);
+        fuse.SetRunParallel(false);
+        fuse.SetUseOBB(true);
+        fuse.SetFuzzyValue(1e-5);
+        fuse.Build();
+        if (fuse.IsDone() && !fuse.Shape().IsNull()) {
+            Diagnostics info;
+            if (inspect(fuse.Shape(), info) && info.volume >= low - slack &&
+                info.volume <= total + slack)
+                return fuse.Shape();
+        }
+    } catch (const Standard_Failure &) {
+        // Preserve the checked input compound, as upstream does.
+    }
+    ctx.diagnostics.warnings.push_back("Boolean fusion failed checks; retained separate bodies");
+    return apart;
 }
 bool inspect(const TopoDS_Shape &shape, Diagnostics &info) {
     trace("solid validation and volume");
@@ -2348,8 +2835,9 @@ bool inspect(const TopoDS_Shape &shape, Diagnostics &info) {
     }
     if (solid_faces.Extent() != faces.Extent())
         info.valid = false;
-    trace(("validation: BRepCheck=" + std::to_string(checked) +
-           " edge-incidence-errors=" + std::to_string(bad_edges) +
+    trace(("validation: BRepCheck=" + std::to_string(checked) + " edge-incidence-errors=" +
+           std::to_string(bad_edges) + " solids=" + std::to_string(info.solids) +
+           " solid-faces=" + std::to_string(solid_faces.Extent()) +
            " faces=" + std::to_string(info.faces) + " volume=" + std::to_string(info.volume))
               .c_str());
     trace("solid validation complete");

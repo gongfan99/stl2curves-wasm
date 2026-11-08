@@ -105,7 +105,38 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
                     throw std::runtime_error("Mesh contains no nondegenerate triangles");
                 // Per-part reconstruction avoids treating overlapping 3MF parts as
                 // a self-intersecting shell; each part may include cavity shells.
-                auto part_meshes = split_parts(object.mesh);
+                auto source_parts = split_parts(object.mesh);
+                const bool overlapping_parts = source_parts.size() > 1;
+                std::size_t repaired_triangles = 0;
+                for (auto &kv : source_parts) {
+                    if (options.repair)
+                        repair_mesh(kv.second, ctx);
+                    else {
+                        const auto top = topology(kv.second);
+                        for (const auto &edge : top.edges) {
+                            ctx.diagnostics.open_edges += edge.second.size() == 1;
+                            ctx.diagnostics.nonmanifold_edges += edge.second.size() > 2;
+                        }
+                    }
+                    repaired_triangles += kv.second.triangles.size();
+                }
+                // Automatic thinning is selected for the whole input object,
+                // then applied to each 3MF part separately (Python prepare()).
+                double simplify = options.simplify < 0 ? (repaired_triangles > 1000000 ? .005 : 0)
+                                                       : options.simplify;
+                std::map<unsigned, Mesh> part_meshes;
+                for (auto &kv : source_parts) {
+                    if (simplify)
+                        simplify_mesh(kv.second, simplify, ctx);
+                    ctx.diagnostics.triangles += kv.second.triangles.size();
+                    for (auto &body : split_bodies(kv.second)) {
+                        unsigned id = unsigned(part_meshes.size());
+                        part_meshes.emplace(id, std::move(body));
+                    }
+                }
+                source_parts.clear();
+                if (part_meshes.empty())
+                    throw std::runtime_error("Mesh contains no reconstructable bodies");
                 std::map<unsigned, std::vector<Patch>> analyses;
                 std::vector<Patch> combined;
                 Mesh measured;
@@ -113,24 +144,7 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
                 std::map<unsigned, std::pair<std::size_t, std::size_t>> vertex_ranges;
                 for (auto &kv : part_meshes) {
                     auto &mesh = kv.second;
-                    if (options.repair)
-                        repair_mesh(mesh, ctx);
-                    else {
-                        auto top = topology(mesh);
-                        for (const auto &edge : top.edges) {
-                            if (edge.second.size() == 1)
-                                ++ctx.diagnostics.open_edges;
-                            if (edge.second.size() > 2)
-                                ++ctx.diagnostics.nonmanifold_edges;
-                        }
-                    }
-                    double simplify = options.simplify < 0
-                                          ? (mesh.triangles.size() > 1000000 ? 0.005 : 0)
-                                          : options.simplify;
-                    if (simplify)
-                        simplify_mesh(mesh, simplify, ctx);
-                    ctx.diagnostics.triangles += mesh.triangles.size();
-                    auto patches = detect(mesh, ctx);
+                    auto patches = analytic_patches(mesh, ctx);
                     unsigned offset = unsigned(measured.triangles.size());
                     triangle_offsets[kv.first] = offset;
                     const auto vertex_offset = measured.points.size();
@@ -147,6 +161,7 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
                         for (auto &vertex : triangle)
                             vertex += std::uint32_t(vertex_offset);
                         measured.triangles.push_back(triangle);
+                        measured.parts.push_back(kv.first);
                     }
                     for (auto p : patches) {
                         p.part = kv.first;
@@ -156,7 +171,8 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
                     }
                     analyses.emplace(kv.first, std::move(patches));
                 }
-                design_size(measured, combined, ctx);
+                if (options.curves)
+                    design_size(measured, combined, ctx);
                 std::size_t patch_offset = 0;
                 for (auto &kv : part_meshes) {
                     const auto range = vertex_ranges.at(kv.first);
@@ -172,6 +188,15 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
                         for (auto &t : patch.triangles)
                             t -= triangle_offsets[kv.first];
                     }
+                    // A design scale changes the absolute mesh fitting band.
+                    // Python reanalyzes the scaled mesh instead of transforming
+                    // a fit found at a different effective tolerance.
+                    if (options.curves && options.true_size && ctx.diagnostics.scale != 1)
+                        patches = analytic_patches(kv.second, ctx);
+                    if (options.curves)
+                        snap_patches(kv.second, patches, ctx,
+                                     options.true_size ? ctx.diagnostics.design_unit : "");
+                    patches = finish_patches(kv.second, std::move(patches), ctx);
                 }
                 // Release assembly measurement storage before allocating BRep
                 // topology. Each part and its patches now own the final data.
@@ -214,10 +239,11 @@ Result convert(const std::vector<InputFile> &inputs, const Options &options) {
                         ctx.diagnostics.fallbacks.push_back(e.what());
                         shape = recover(mesh, patches, ctx);
                     }
+                    shape = join_boundary_runs(shape, mesh, patches, options.tolerance);
                     shapes.push_back(shape);
                     ctx.expired();
                 }
-                auto shape = unite(shapes, ctx);
+                auto shape = unite(shapes, ctx, overlapping_parts);
                 if (!inspect(shape, ctx.diagnostics))
                     throw std::runtime_error("Final solid failed validation");
                 auto model = ModelAccess::create(unique(safe_name(object.name)), shape,

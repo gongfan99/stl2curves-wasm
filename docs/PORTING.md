@@ -20,6 +20,8 @@ least squares instead of NumPy/SciPy. Advanced surface candidates are measured
 against mesh corners before use. Unrecognized regions retain planar geometry.
 Recognition is heuristic: a detected feature is not proof that the final solid
 retained it; inspect `diagnostics.surfaceCounts` and `diagnostics.fallbacks`.
+The source audit, executable Python-oracle checks, and remaining algorithm gaps
+are recorded in [Python/C++ parity](PYTHON_PARITY.md).
 
 Collection types use the current `NCollection` templates rather than relying on
 deprecated headers being installed. `cpp/occt_collections.hpp` keeps older native
@@ -65,6 +67,16 @@ normals into connected pieces. Precise reconstructed pieces are retained; the
 looser accuracy-scaled fit recovers areas those pieces do not explain. Height-field
 trim charts use their affine base coordinates, as `Freeform.uvh()` does, rather
 than moving each chart vertex independently to a nearest surface point.
+Between-corner bulge checks also follow `Freeform.signed()`: divide the height
+residual by the implicit gradient norm. Their accuracy-scaled allowance stays
+independent of stricter corner-fit trials; coupling the two over-refines steep
+smooth patches into splines that follow the tessellation.
+Several precise height-field pieces can also be replaced by one fit at the
+requested accuracy when it uses fewer control points overall. This removes
+artificial partition boundaries while retaining precise single patches and
+protecting exact or swept child surfaces from replacement. A sampled comparison
+against the previous fitted interiors also bounds the change by the same
+bulge allowance; passing the mesh-corner check alone does not establish this.
 
 As in Python `attempt()` and `sewing_cap()`, fitted-patch sewing adapts to measured
 mesh-to-support gaps, capped by 0.2 mm and twice the median mesh edge, with the
@@ -72,6 +84,28 @@ configured tolerance as its lower bound. UV trims, repaired 3D outlines, and bou
 kernel splitting are tried before retaining triangulated trims on the same support.
 The native kernel-cut fallback is restricted to small supports because an in-process
 OpenCascade call cannot use Python's worker timeout.
+
+Fitted outlines first use shared 3D runs grouped by the neighboring face and split
+at 30-degree turns, following `_runs`, `_split_sharp`, and `_even`. The run pool
+uses natural primitive lines/arcs where available and interpolates other whole
+runs through the original mesh points, densifying long steps. Curved faces are
+built before their planar neighbors. Touching outlines are split into unpinched
+pieces on the same support. Outline, kernel-split, polygon and wider-split
+construction follow Python's order, with the existing limit on expensive cuts.
+The result must pass closed-solid and corrected-volume checks; otherwise the
+established analytic/projected construction remains available.
+
+In that fallback path, spherical outlines also use shared 3D runs. A single
+sphere-side edge may bow onto its support while the neighboring freeform keeps
+its mesh chord, as in `_run_edge`; sewing can retain the chord within the measured
+gap. Chord preference is restricted to isolated sphere/freeform seams. Applying
+it to all freeform boundaries changes unrelated regression geometry. Outline
+repair and cleanup retain Python's 1 mm maximum face-tolerance gate alongside
+the existing validity and corrected-volume checks.
+
+Shared-corner crowding follows Python's fixed `SHARED_CROWD = 0.02` mm,
+independently of adaptive sewing. Using twice the sewing tolerance instead
+silently expands the exclusion radius to 0.4 mm on loosely sewn fitted parts.
 
 Final cleanup follows `_tidy` and `_bad_merges`: merge at 0.001 mm and 0.1 degrees,
 keep seams of invalid merged faces apart, and check volume integration within 0.1%
@@ -82,6 +116,21 @@ for every face prevents the kernel from merging B-spline faces on one support.
 GLB export retries faces omitted by the default body tessellation with a finer,
 area-scaled deflection. This handles tiny valid trims left by reconstruction
 without removing faces or changing the retained model's graph identities.
+
+Analytic cone seeds use Python `_cone`/`_line_on_direction` with a fixed,
+normal-derived axis. Whole-island proposals retain nonlinear fitting, as in
+`_whole_region`/`_tube_fit`. Optimizing tiny local cone seeds can incorrectly
+claim spherical bands with only two vertex rings. A subsequent fixed-axis pass
+follows `_axis_patches`, using established cylinder/cone axes to recover smaller
+tapered regions before freeform fitting. The late sphere-to-cone rewrite has
+been removed because it undoes this recognition sequence.
+
+After analytic recognition, small planar facets up to 2% of the largest facet
+remain available to smooth fitting, as in `blends.add_blends()`. Applying this
+before analytic recognition can lose established cylinders and cones. Height
+fields first try the requested fitting tolerance, as in `freeform.fit()`;
+stricter fits remain fallbacks. Trying strict fits first creates extra pieces
+and artificial boundaries on otherwise smooth regions.
 
 The new implementation does not reproduce every upstream repair and recovery
 heuristic verbatim. Self-intersecting/nonmanifold meshes can still fail instead

@@ -1,0 +1,24 @@
+{
+  "input": "test_corners2.stl",
+  "sha256": "5920038bc385cdecd140851a29348ed0aa8c44674dc3c9d8b231ad02d83f4b3d",
+  "version": "0.4.0",
+  "tolerance": 0.01,
+  "accuracy": 0.1,
+  "fuse": false,
+  "workers": 1,
+  "points": 2720,
+  "triangles": 5436,
+  "features": 20,
+  "edges": 137,
+  "volume_epsilon": 1e-05,
+  "brep_volume": 14072.08878242096,
+  "module_hashes": {
+    "features": "a516b731f7d5ac5d3ee4f61d26becbdfce53e0880900480afd5ab05ee734f70a",
+    "fillets": "6061ad1db8121e1df304275bbfb98a53d3fdf2ad4e932039642077fb3eedcea1",
+    "blends": "ea383bd9761300b4476edfb9819cacfecc3d872951b9509330d6c046a9837592",
+    "freeform": "74684af9c99190c64f332825ccf5736d59075596b26c0c04d0af3cd6e018e821",
+    "build": "3c8ec7d2c00054adca657595133d6e0011afeb90410a75c0693ee3a9a57b4acb",
+    "convert": "ae46962ffd2c1ff4a668b01f11afbc87ecf34a1e0d6bd1c5613c68748d555155",
+    "accuracy": "322c5fd9f38e1e373ff91a703df685849d525ac5bab82232398c805806dba7eb"
+  }
+}

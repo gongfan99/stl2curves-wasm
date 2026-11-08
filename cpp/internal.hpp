@@ -12,12 +12,14 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <memory>
 #include <stdexcept>
 #include <stl2curves/converter.hpp>
 #include <unordered_map>
 
 namespace stl2curves::detail {
-inline constexpr double volume_epsilon = 1e-7;
+// convert.VOLUME_EPS: use the same adaptive integration precision as Python.
+inline constexpr double volume_epsilon = 1e-5;
 using Vec = Eigen::Vector3d;
 using Tri = std::array<std::uint32_t, 3>;
 using Clock = std::chrono::steady_clock;
@@ -59,6 +61,9 @@ struct Context {
         return true;
     }
 };
+namespace reference_features {
+struct Found;
+}
 struct Patch {
     std::string kind;
     unsigned part = 0, body = 0;
@@ -66,6 +71,9 @@ struct Patch {
     Handle(Geom_Surface) surface;
     Vec origin = Vec::Zero(), axis = Vec::UnitZ();
     double radius = 0, secondary = 0, deviation = 0;
+    double rim_deviation = 0;
+    bool trimmed = false;
+    std::shared_ptr<reference_features::Found> reference_feature;
 };
 Mesh read_stl(const Bytes &bytes);
 std::vector<Object> read_3mf(const Bytes &bytes);
@@ -77,18 +85,27 @@ void simplify_mesh(Mesh &mesh, double tolerance, Context &context);
 std::vector<Mesh> split_bodies(const Mesh &mesh);
 double signed_volume(const Mesh &mesh);
 std::vector<Patch> detect(const Mesh &mesh, Context &context);
+std::vector<Patch> analytic_patches(const Mesh &mesh, Context &context);
+std::vector<Patch> finish_patches(const Mesh &mesh, std::vector<Patch> patches, Context &context);
 std::vector<Patch> advanced_patches(const Mesh &mesh, const Topology &top,
                                     const std::vector<int> &owner,
                                     const std::vector<Patch> &recognized, Context &context);
 Patch thread_patch(const Mesh &mesh, const Topology &top, const std::vector<unsigned> &triangles,
                    const Vec &axis, double tolerance);
+Patch reference_freeform_patch(const Mesh &mesh, const Topology &top,
+                               const std::vector<unsigned> &facets, Context &context);
 void design_size(Mesh &mesh, std::vector<Patch> &patches, Context &context);
+void snap_patches(const Mesh &mesh, std::vector<Patch> &patches, const Context &context,
+                  const std::string &round_unit = "");
 TopoDS_Shape reconstruct(const Mesh &mesh, const std::vector<Patch> &patches, Context &context);
+TopoDS_Shape join_boundary_runs(const TopoDS_Shape &shape, const Mesh &mesh,
+                                const std::vector<Patch> &patches, double tolerance);
 TopoDS_Shape faceted(const Mesh &mesh, double tolerance);
 TopoDS_Shape tidy_shape(const TopoDS_Shape &shape, const Mesh &mesh,
                         const std::vector<Patch> &patches, double tolerance);
 TopoDS_Shape recover(const Mesh &mesh, const std::vector<Patch> &patches, Context &context);
-TopoDS_Shape unite(const std::vector<TopoDS_Shape> &shapes, Context &context);
+TopoDS_Shape unite(const std::vector<TopoDS_Shape> &shapes, Context &context,
+                   bool overlapping_parts = true);
 bool inspect(const TopoDS_Shape &shape, Diagnostics &info);
 bool volume_agrees(const TopoDS_Shape &shape, const Mesh &mesh, const std::vector<Patch> &patches);
 Bytes write_step(const TopoDS_Shape &shape, double tolerance, bool surface_curves = true);
