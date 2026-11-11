@@ -4,15 +4,38 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#090d24">
-  <title>STEP Viewer | A Tool by L2CAD</title>
-  <meta name="description" content="Open STEP files in your browser. Inspect faces and edges and measure exact distances. Your files stay on your device.">
+  <title>Free Online STEP Viewer | L2CAD</title>
+  <meta name="description" content="Open STEP and STP CAD files in your browser. Inspect faces and edges, explore 3D models, and measure exact distances. Files stay on your device.">
   <link rel="icon" type="image/svg+xml" href="./l2cad_logo.svg">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="L2CAD">
+  <meta property="og:title" content="Free Online STEP Viewer | L2CAD">
+  <meta property="og:description" content="View STEP and STP CAD files in your browser. Inspect faces and edges and measure exact distances with private, local processing.">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Free Online STEP Viewer | L2CAD">
+  <meta name="twitter:description" content="Open STEP and STP files in your browser to inspect CAD geometry and measure exact distances. Your files stay on your device.">
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "L2CAD STEP Viewer",
+      "applicationCategory": "DesignApplication",
+      "operatingSystem": "Web browser",
+      "description": "A browser-based STEP and STP viewer for exploring CAD models, inspecting faces and edges, and measuring exact distances. Files are processed locally on your device.",
+      "publisher": {
+        "@type": "Organization",
+        "name": "L2CAD",
+        "url": "https://l2cad.com"
+      },
+      "featureList": ["STEP and STP file viewing", "CAD face and edge inspection", "Exact distance measurement", "Local browser processing"]
+    }
+  </script>
   <link rel="stylesheet" href="./workspace.css">
   <style>
     .workspace { grid-template-columns: minmax(0, 1fr); }
     .viewport { height: clamp(350px, 68vh, 1100px); }
     .viewport.dragging::after { content: 'Drop one STEP file'; }
-    .viewer-toolbar { justify-content: flex-start; flex-wrap: wrap; min-height: 65px; }
+    .viewer-toolbar { justify-content: flex-start; flex-wrap: wrap; min-height: 65px; padding-top: 12px; }
     .viewer-toolbar .output-message { margin-left: auto; }
     @media (max-width: 760px) {
       .viewport { height: max(420px, 60vh); }
@@ -27,15 +50,14 @@
 <body>
   <div class="app">
     <header class="topbar">
-      <a class="brand" href="https://l2cad.com" aria-label="L2CAD home">
+      <a class="brand" href="https://l2cad.com/" aria-label="L2CAD home">
         <img class="brand-icon" src="./l2cad_logo.svg" alt="" width="40" height="40">
-        <div><div class="brand-name">L2CAD</div><div class="brand-caption">STEP workspace</div></div>
+        <div><div class="brand-name">L2CAD</div><div class="brand-caption">STEP viewer</div></div>
       </a>
       <div class="runtime"><span class="dot"></span><span id="runtime">Local processing</span></div>
     </header>
     <main class="workspace">
-      <section class="panel" aria-labelledby="output-heading">
-        <div class="panel-header"><div class="panel-title"><span class="number green">01</span><h2 id="output-heading">STEP viewer</h2></div><span class="pill" id="output-badge">STEP / STP</span></div>
+      <section class="panel" aria-label="STEP viewer">
         <div class="toolbar viewer-toolbar">
           <button class="primary" id="open-file" type="button"><svg viewBox="0 0 24 24"><path d="M12 16V4m-4 4 4-4 4 4 M4 15v5h16v-5"/></svg>Open STEP file</button>
           <input id="file" type="file" accept=".step,.stp" aria-label="Open one STEP file" hidden>
@@ -72,7 +94,7 @@
     const sharedTarget = new THREE.Vector3();
     const keyLightOffset = new THREE.Vector3(-3, 5, 8).normalize();
     const inspection = { objects: [], hover: null, selected: [], properties: new Map(),
-      pickObjects: [], pickSources: new Map(), dimension: 1, token: 0, down: null, distanceGroup: null, midpoint: null };
+      pickObjects: [], pickSources: new Map(), token: 0, down: null, distanceGroup: null, midpoint: null };
     const raycaster = new THREE.Raycaster();
     const inspectionMaterials = {
       hover: { face: new THREE.MeshBasicMaterial({ color: 0xffb020, side: THREE.DoubleSide }), edge: new THREE.LineBasicMaterial({ color: 0xffb020, depthTest: false }), vertex: new THREE.PointsMaterial({ color: 0xffb020, size: 10, sizeAttenuation: false, depthTest: false }) },
@@ -145,7 +167,6 @@
         $('output-name').textContent = 'No file selected';
         $('output-stats').textContent = '— faces';
         $('output-message').textContent = 'Open a STEP file to inspect it';
-        $('output-badge').textContent = 'STEP / STP';
         $('diagnostics').hidden = true;
         status(`The STEP viewer worker stopped: ${message}`, 'error');
       };
@@ -304,10 +325,8 @@
     function attachInspection() {
       views[0].model.updateWorldMatrix(true, true);
       views[0].model.traverse(object => { if (selectionKind(object)) inspection.objects.push(object); });
-      const bounds = new THREE.Box3();
       for (const object of inspection.objects) {
         object.visible = true;
-        if (selectionKind(object) === 'face') bounds.union(new THREE.Box3().setFromObject(object, true));
         if (selectionKind(object) === 'face') inspection.pickObjects.push(object);
         else {
           // Three.js line/point raycasting divides precision by object.scale,
@@ -320,11 +339,6 @@
           inspection.pickObjects.push(proxy); inspection.pickSources.set(proxy, object);
         }
       }
-      if (bounds.isEmpty()) bounds.setFromObject(views[0].model, true);
-      const size = bounds.getSize(new THREE.Vector3());
-      inspection.dimension = Math.max(size.x, size.y, size.z, .001);
-      raycaster.params.Line.threshold = inspection.dimension * .006;
-      raycaster.params.Points.threshold = inspection.dimension * .008;
       views[0].renderer.domElement.style.cursor = 'crosshair';
       showMeasurement('Select the first face, edge, or vertex.');
     }
@@ -335,6 +349,13 @@
       const x = (event.clientX - rect.left) * view.element.clientWidth / rect.width - viewport.x;
       const y = (rect.bottom - event.clientY) * view.element.clientHeight / rect.height - viewport.y;
       if (x < 0 || y < 0 || x > viewport.z || y > viewport.w) return null;
+      // Keep edge and vertex picking within a few screen pixels. Converting
+      // this tolerance to world units on every pick makes it finer in model
+      // space as the camera zooms in.
+      const worldPerPixel = 2 * sharedCamera.position.distanceTo(sharedTarget) *
+        Math.tan(THREE.MathUtils.degToRad(sharedCamera.fov / 2)) / viewport.w;
+      raycaster.params.Line.threshold = worldPerPixel * 3;
+      raycaster.params.Points.threshold = worldPerPixel * 4;
       raycaster.setFromCamera(new THREE.Vector2(2 * x / viewport.z - 1, 2 * y / viewport.w - 1), sharedCamera);
       view.model.updateWorldMatrix(true, true);
       const hits = raycaster.intersectObjects(inspection.pickObjects, false).map(hit =>
@@ -471,12 +492,11 @@
         views[0].model = nextObject; views[0].content.add(nextObject); normalizeView(views[0]);
         attachInspection();
         $('output-empty').hidden = true;
-        const { faces, solids, valid, surfaceCounts, warnings } = result.model.diagnostics;
+        const { faces, solids, surfaceCounts, warnings } = result.model.diagnostics;
         const elapsed = ((performance.now() - started) / 1000).toFixed(1);
         $('output-name').textContent = file.name; $('output-name').title = file.name;
         $('output-stats').textContent = `${formatNumber(faces)} faces · ${formatNumber(solids)} solids`;
         $('output-message').textContent = 'Hover to inspect · Select two shapes to measure';
-        $('output-badge').textContent = valid ? 'STEP model' : 'Check details';
         $('runtime').textContent = result.info.threaded ? `Threaded · ${result.info.workers} workers` : 'Single-thread · local';
         const notes = [...warnings, ...result.glb.warnings];
         $('diagnostics').hidden = false;

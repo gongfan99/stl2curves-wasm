@@ -34,6 +34,11 @@
   <script type="importmap">
     { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/" } }
   </script>
+  <script>
+    if (!['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {
+      document.write('<script src="./coi-serviceworker.js"><\/script>');
+    }
+  </script>
 </head>
 <body>
   <div class="app">
@@ -75,7 +80,7 @@
         <div class="panel-header"><div class="panel-title"><span class="number green">02</span><h2 id="output-heading">Reconstructed model</h2></div><span class="pill" id="output-badge">glTF preview</span></div>
         <div class="toolbar output-toolbar"><span class="output-message"><svg viewBox="0 0 24 24"><path d="m9 8-4 4 4 4m6-8 4 4-4 4m-2-12-2 24"/></svg><span id="output-message">Convert to reveal your model</span></span>
           <div class="download"><button class="primary" id="download" type="button" aria-expanded="false" aria-controls="download-menu" disabled><svg viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5"/></svg>Download<svg viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></svg></button>
-            <div class="menu" id="download-menu" hidden><button type="button" data-format="glb">GLB</button><button type="button" data-format="step">STEP</button></div>
+            <div class="menu" id="download-menu" hidden><button type="button" data-format="step">STEP</button><button type="button" data-format="glb">GLB</button></div>
           </div>
         </div>
         <div class="viewport" id="output-view" aria-label="Reconstructed 3D viewer">
@@ -114,7 +119,7 @@
     const sharedTarget = new THREE.Vector3();
     const keyLightOffset = new THREE.Vector3(-3, 5, 8).normalize();
     const inspection = { objects: [], hover: null, selected: [], properties: new Map(),
-      pickObjects: [], pickSources: new Map(), dimension: 1, token: 0, down: null, distanceGroup: null, midpoint: null };
+      pickObjects: [], pickSources: new Map(), token: 0, down: null, distanceGroup: null, midpoint: null };
     const raycaster = new THREE.Raycaster();
     const inspectionMaterials = {
       hover: { face: new THREE.MeshBasicMaterial({ color: 0xffb020, side: THREE.DoubleSide }), edge: new THREE.LineBasicMaterial({ color: 0xffb020, depthTest: false }), vertex: new THREE.PointsMaterial({ color: 0xffb020, size: 10, sizeAttenuation: false, depthTest: false }) },
@@ -453,10 +458,8 @@
     function attachInspection() {
       views[1].model.updateWorldMatrix(true, true);
       views[1].model.traverse(object => { if (selectionKind(object)) inspection.objects.push(object); });
-      const bounds = new THREE.Box3();
       for (const object of inspection.objects) {
         object.visible = true;
-        if (selectionKind(object) === 'face') bounds.union(new THREE.Box3().setFromObject(object, true));
         if (selectionKind(object) === 'face') inspection.pickObjects.push(object);
         else {
           // Three.js line/point raycasting divides precision by object.scale,
@@ -469,10 +472,6 @@
           inspection.pickObjects.push(proxy); inspection.pickSources.set(proxy, object);
         }
       }
-      const size = bounds.getSize(new THREE.Vector3());
-      inspection.dimension = Math.max(size.x, size.y, size.z, .001);
-      raycaster.params.Line.threshold = inspection.dimension * .006;
-      raycaster.params.Points.threshold = inspection.dimension * .008;
       views[1].renderer.domElement.style.cursor = 'crosshair';
       showMeasurement('Select the first face, edge, or vertex.');
     }
@@ -483,6 +482,13 @@
       const x = (event.clientX - rect.left) * view.element.clientWidth / rect.width - viewport.x;
       const y = (rect.bottom - event.clientY) * view.element.clientHeight / rect.height - viewport.y;
       if (x < 0 || y < 0 || x > viewport.z || y > viewport.w) return null;
+      // Keep edge and vertex picking within a few screen pixels. Converting
+      // this tolerance to world units on every pick makes it finer in model
+      // space as the camera zooms in.
+      const worldPerPixel = 2 * sharedCamera.position.distanceTo(sharedTarget) *
+        Math.tan(THREE.MathUtils.degToRad(sharedCamera.fov / 2)) / viewport.w;
+      raycaster.params.Line.threshold = worldPerPixel * 3;
+      raycaster.params.Points.threshold = worldPerPixel * 4;
       raycaster.setFromCamera(new THREE.Vector2(2 * x / viewport.z - 1, 2 * y / viewport.w - 1), sharedCamera);
       view.model.updateWorldMatrix(true, true);
       const hits = raycaster.intersectObjects(inspection.pickObjects, false).map(hit =>

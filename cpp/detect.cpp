@@ -16,6 +16,8 @@
 #include <Geom_Plane.hxx>
 #include <Geom_SphericalSurface.hxx>
 #include <Geom_ToroidalSurface.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Pln.hxx>

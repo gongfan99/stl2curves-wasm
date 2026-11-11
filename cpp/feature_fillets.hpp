@@ -593,7 +593,8 @@ struct FilletPort {
             return a == UINT64_MAX ? 1546275796 : a;
         }
         bool insert(Key key, std::uint64_t h) {
-            auto mask = slots.size() - 1, at = h & mask, perturb = h;
+            const std::uint64_t mask = slots.size() - 1;
+            std::uint64_t at = h & mask, perturb = h;
             for (;;) {
                 unsigned count = at + 9 <= mask ? 10 : 1;
                 for (unsigned j = 0; j < count; ++j) {

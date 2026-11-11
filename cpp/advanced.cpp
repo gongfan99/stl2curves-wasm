@@ -226,7 +226,7 @@ Patch height_field(const Mesh &mesh, const Topology &top, const std::vector<unsi
             Vec q = mesh.points[ids[i]] - center;
             projected.row(i) = q - q.dot(normal) * normal;
         }
-        e = projected.jacobiSvd(Eigen::ComputeThinV).matrixV().col(0);
+        e = Eigen::JacobiSVD<Eigen::MatrixXd>(projected, Eigen::ComputeThinV).matrixV().col(0);
     }
     e -= e.dot(normal) * normal;
     e.normalize();

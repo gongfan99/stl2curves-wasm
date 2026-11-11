@@ -31,7 +31,7 @@ inline Found corner_surface(const Pass &pass, const std::vector<unsigned> &facet
         centered.row(i) = P[i] - center;
     std::array<Vec, 2> guesses{
         Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>(normal_matrix).eigenvectors().col(0),
-        centered.jacobiSvd(Eigen::ComputeThinV).matrixV().col(0)};
+        Eigen::JacobiSVD<Eigen::MatrixXd>(centered, Eigen::ComputeThinV).matrixV().col(0)};
     double best_error = std::numeric_limits<double>::infinity();
     Model best;
     for (const auto &guess : guesses) {

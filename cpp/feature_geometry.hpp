@@ -473,7 +473,8 @@ struct Pass {
             for (unsigned i = 0; i < ring.second.size(); ++i)
                 centered.row(i) = ring.second[i] - center;
             Model frame;
-            frame.frame(centered.jacobiSvd(Eigen::ComputeThinV).matrixV().col(2));
+            frame.frame(
+                Eigen::JacobiSVD<Eigen::MatrixXd>(centered, Eigen::ComputeThinV).matrixV().col(2));
             std::vector<Eigen::Vector2d> xy;
             for (auto &q : ring.second)
                 xy.emplace_back((q - center).dot(frame.e1), (q - center).dot(frame.e2));
@@ -578,7 +579,9 @@ struct Pass {
                 unsigned row = 0;
                 for (auto v : rv)
                     centered.row(row++) = m.points[v] - mid;
-                flat_normal = centered.jacobiSvd(Eigen::ComputeThinV).matrixV().col(2);
+                flat_normal = Eigen::JacobiSVD<Eigen::MatrixXd>(centered, Eigen::ComputeThinV)
+                                  .matrixV()
+                                  .col(2);
                 flat = true;
                 for (auto v : rv)
                     if (std::abs((m.points[v] - mid).dot(flat_normal)) > fs.tolerance)
